@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.10](https://github.com/rcore-os/tgoskits/compare/pcie-v0.6.9...pcie-v0.6.10) - 2026-08-15
+
+### Other
+
+- updated the following local packages: rdif-msi
+
 ## [0.6.9](https://github.com/rcore-os/tgoskits/compare/pcie-v0.6.8...pcie-v0.6.9) - 2026-08-09
 
 ### Other

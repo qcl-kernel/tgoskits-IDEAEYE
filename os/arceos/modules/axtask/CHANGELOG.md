@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.8](https://github.com/rcore-os/tgoskits/compare/ax-task-v0.6.7...ax-task-v0.6.8) - 2026-08-15
+
+### Fixed
+
+- *(starry-kernel)* unify PID namespace identity ownership ([#2023](https://github.com/rcore-os/tgoskits/pull/2023))
+
+### Other
+
+- *(errors)* introduce domain-owned error boundaries ([#2024](https://github.com/rcore-os/tgoskits/pull/2024))
+- *(sync)* move lock implementation into ax-task ([#1962](https://github.com/rcore-os/tgoskits/pull/1962))
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
 ## [0.6.7](https://github.com/rcore-os/tgoskits/compare/ax-task-v0.6.6...ax-task-v0.6.7) - 2026-08-09
 
 ### Fixed

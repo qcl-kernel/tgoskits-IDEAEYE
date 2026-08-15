@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3](https://github.com/rcore-os/tgoskits/compare/rdif-intc-v0.15.2...rdif-intc-v0.15.3) - 2026-08-15
+
+### Other
+
+- updated the following local packages: irq-framework
+
 ## [0.15.2](https://github.com/rcore-os/tgoskits/compare/rdif-intc-v0.15.1...rdif-intc-v0.15.2) - 2026-08-09
 
 ### Other
