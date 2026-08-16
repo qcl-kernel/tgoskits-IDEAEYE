@@ -50,7 +50,9 @@ static REASON_COUNTS: [AtomicU64; REASON_COUNT] = [const { AtomicU64::new(0) }; 
 pub fn cntpct() -> u64 {
     let v: u64;
     // Safety: CNTPCT_EL0 is accessible at every exception level.
-    unsafe { core::arch::asm!("mrs {0}, cntpct_el0", out(reg) v); }
+    unsafe {
+        core::arch::asm!("mrs {0}, cntpct_el0", out(reg) v);
+    }
     v
 }
 
@@ -111,10 +113,19 @@ const REASON_NAMES: [&str; REASON_COUNT] = [
 /// Prints a human-readable summary (called when the VM stops).
 pub fn dump() {
     let count = EXIT_COUNT.load(Ordering::Relaxed);
-    let entry_avg = if count > 0 { ENTRY_CYCLES_SUM.load(Ordering::Relaxed) / count } else { 0 };
-    let exit_avg = if count > 0 { EXIT_CYCLES_SUM.load(Ordering::Relaxed) / count } else { 0 };
+    let entry_avg = if count > 0 {
+        ENTRY_CYCLES_SUM.load(Ordering::Relaxed) / count
+    } else {
+        0
+    };
+    let exit_avg = if count > 0 {
+        EXIT_CYCLES_SUM.load(Ordering::Relaxed) / count
+    } else {
+        0
+    };
     info!(
-        "RT-STATS: exits={count} | entry_cycles min={} avg={entry_avg} max={} | exit_cycles min={} avg={exit_avg} max={}",
+        "RT-STATS: exits={count} | entry_cycles min={} avg={entry_avg} max={} | exit_cycles \
+         min={} avg={exit_avg} max={}",
         ENTRY_CYCLES_MIN.load(Ordering::Relaxed),
         ENTRY_CYCLES_MAX.load(Ordering::Relaxed),
         EXIT_CYCLES_MIN.load(Ordering::Relaxed),

@@ -64,7 +64,11 @@ fn fold_minmax(min: &AtomicU64, max: &AtomicU64, v: u64) {
 /// Prints the AxVM-side and (on aarch64) arm_vcpu-side RT counters.
 pub fn dump() {
     let samples = WAKE_SAMPLES.load(Ordering::Relaxed);
-    let avg = if samples > 0 { WAKE_SUM_NANOS.load(Ordering::Relaxed) / samples } else { 0 };
+    let avg = if samples > 0 {
+        WAKE_SUM_NANOS.load(Ordering::Relaxed) / samples
+    } else {
+        0
+    };
     info!(
         "RT-STATS: wakeup_samples={samples} min={} avg={avg} max={} (ns)",
         WAKE_MIN_NANOS.load(Ordering::Relaxed),

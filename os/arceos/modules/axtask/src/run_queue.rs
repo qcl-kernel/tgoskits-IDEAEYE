@@ -1122,10 +1122,18 @@ fn gc_entry() {
                 }
             }
         }
-        // On gc-disabled (partitioned RT) CPUs, block until explicitly notified
-        // (an exited task) instead of polling every 100 ms: a vCPU that owns the
-        // core must not be disturbed by periodic gc wakeups.
+        // On gc-disabled (partitioned RT) CPUs, do not keep the periodic
+        // wake-and-poll loop. Still use a timeout wait rather than a bare
+        // `wait()` so we do not reintroduce the lost-notify race described
+        // below: a notification may arrive before the gc task blocks.
         if gc_disabled_on_current_cpu() {
+            #[cfg(feature = "irq")]
+            unsafe {
+                let _timeout = WAIT_FOR_EXIT
+                    .current_ref_raw()
+                    .wait_timeout(core::time::Duration::from_millis(100));
+            }
+            #[cfg(not(feature = "irq"))]
             unsafe {
                 WAIT_FOR_EXIT.current_ref_raw().wait();
             }

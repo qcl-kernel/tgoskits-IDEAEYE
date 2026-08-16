@@ -35,7 +35,7 @@
 cd <repo>
 cargo xtask axvisor qemu \
   --config configs/board/qemu-aarch64-rt.toml \
-  --qemu-config .github/workflows/qemu-aarch64.toml \
+  --qemu-config .github/workflows/qemu-aarch64-rt.toml \
   --vmconfigs os/axvisor/tmp/vmconfigs/freertos-rt-smp1.generated.toml
 ```
 

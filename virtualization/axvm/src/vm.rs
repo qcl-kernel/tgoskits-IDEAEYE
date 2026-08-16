@@ -1121,8 +1121,13 @@ impl AxVM {
             // feature targets: the mapping cannot change concurrently within
             // one vCPU task.
             let chunks = self
-                .with_resources(|r| Ok(r.address_space.translated_byte_buffer(gpa_ptr, buffer.len())))?
-                .ok_or_else(|| ax_err!(InvalidInput, "Failed to translate guest physical address"))?;
+                .with_resources(|r| {
+                    Ok(r.address_space
+                        .translated_byte_buffer(gpa_ptr, buffer.len()))
+                })?
+                .ok_or_else(|| {
+                    ax_err!(InvalidInput, "Failed to translate guest physical address")
+                })?;
             let mut copied = 0;
             for chunk in chunks {
                 let len = (buffer.len() - copied).min(chunk.len());
@@ -1189,7 +1194,9 @@ impl AxVM {
                     r.mark_guest_code_dirty();
                     Ok(r.address_space.translated_byte_buffer(gpa_ptr, data.len()))
                 })?
-                .ok_or_else(|| ax_err!(InvalidInput, "Failed to translate guest physical address"))?;
+                .ok_or_else(|| {
+                    ax_err!(InvalidInput, "Failed to translate guest physical address")
+                })?;
             write_guest_bytes_to_chunks(chunks.as_mut_slice(), data)
         }
         #[cfg(not(feature = "rt-lock-opt"))]

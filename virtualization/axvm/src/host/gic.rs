@@ -178,12 +178,16 @@ pub(crate) fn route_el2_timer_to_group0() {
     }
 
     // GICD_CTLR: enable Group 0 (bit 0).
-    let gicd_ctlr = default_host().phys_to_virt(PhysAddr::from(host_gicd_base().as_usize() + GICD_CTLR_OFF));
+    let gicd_ctlr =
+        default_host().phys_to_virt(PhysAddr::from(host_gicd_base().as_usize() + GICD_CTLR_OFF));
     // SAFETY: MMIO read-modify-write on the host distributor, EnableGrp0.
     unsafe {
         let p = gicd_ctlr.as_usize() as *mut u32;
         let v = core::ptr::read_volatile(p);
         core::ptr::write_volatile(p, v | 0x1);
     }
-    info!("RT: routed EL2 physical timer PPI (GIC ID {EL2_PHYS_TIMER_GIC_ID}) to Group 0 on CPU {cpu_id}");
+    info!(
+        "RT: routed EL2 physical timer PPI (GIC ID {EL2_PHYS_TIMER_GIC_ID}) to Group 0 on CPU \
+         {cpu_id}"
+    );
 }

@@ -28,8 +28,8 @@
 ```
 cargo xtask axvisor qemu \
   --config configs/board/qemu-aarch64-rt.toml \
-  --qemu-config .github/workflows/qemu-aarch64.toml \
-  --vmconfigs configs/vms/qemu/aarch64/freertos-rt-smp1.toml
+  --qemu-config .github/workflows/qemu-aarch64-rt.toml \
+  --vmconfigs os/axvisor/tmp/vmconfigs/freertos-rt-smp1.generated.toml
 ```
 
 1. guest 跑 demo 任务并打印 `RT-STATS ...`（IRQ→任务延迟等）。

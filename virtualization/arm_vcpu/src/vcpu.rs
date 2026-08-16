@@ -389,8 +389,10 @@ impl<H: ArmHostOps> ArmVcpu<H> {
             } else if code_dirty {
                 // Only guest code changed: invalidate the I-cache to PoU.
                 // (TLB entries are untouched.)
-                core::arch::asm!("ic iallu
-                                  isb");
+                core::arch::asm!(
+                    "ic iallu
+                                  isb"
+                );
             }
         }
     }
