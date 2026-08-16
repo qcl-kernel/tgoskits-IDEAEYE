@@ -58,6 +58,24 @@ static mut RUN_QUEUES: [MaybeUninit<&'static mut AxRunQueue>; crate::build_info:
 #[allow(clippy::declare_interior_mutable_const)] // It's ok because it's used only for initialization `RUN_QUEUES`.
 const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut AxRunQueue> = MaybeUninit::uninit();
 
+/// Bitmask of CPUs on which the per-CPU `gc` task must not run its periodic
+/// wake-and-poll loop (CPU partitioning: the vCPU owns the core). Set by the
+/// hypervisor for real-time guests before the vCPU tasks start.
+static GC_DISABLED_CPU_MASK: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Marks the given CPU-bitmask as gc-disabled: the gc task on those CPUs blocks
+/// until notified instead of polling every 100 ms.
+pub fn set_gc_disabled_cpu_mask(mask: usize) {
+    GC_DISABLED_CPU_MASK.store(mask, core::sync::atomic::Ordering::Release);
+}
+
+/// Whether the current CPU is gc-disabled.
+fn gc_disabled_on_current_cpu() -> bool {
+    let mask = GC_DISABLED_CPU_MASK.load(core::sync::atomic::Ordering::Acquire);
+    mask & (1usize << this_cpu_id()) != 0
+}
+
 #[cfg(not(feature = "host-test"))]
 fn main_task_stack() -> TaskStack {
     let (stack_ptr, stack_size) = ax_hal::mem::boot_stack_bounds(this_cpu_id());
@@ -1103,6 +1121,15 @@ fn gc_entry() {
                     EXITED_TASKS.with_current(|exited_tasks| exited_tasks.push_back(task));
                 }
             }
+        }
+        // On gc-disabled (partitioned RT) CPUs, block until explicitly notified
+        // (an exited task) instead of polling every 100 ms: a vCPU that owns the
+        // core must not be disturbed by periodic gc wakeups.
+        if gc_disabled_on_current_cpu() {
+            unsafe {
+                WAIT_FOR_EXIT.current_ref_raw().wait();
+            }
+            continue;
         }
         // Always wait with a timeout to:
         // 1. Yield CPU to allow other tasks to complete `switch_to` and drop references

@@ -106,7 +106,16 @@ pub(crate) fn check_events() {
     // SAFETY: Called from a vCPU task pinned to a CPU whose timer list was
     // initialized during AxVM host initialization.
     let timer_list = unsafe { TIMER_LIST.current_ref_mut_raw() };
+    // Bound the service time at one exit boundary: a callback that re-arms at
+    // the same deadline must not spin forever; the wheel is drained again at
+    // the next exit.
+    let mut budget = 64usize;
     loop {
+        if budget == 0 {
+            rearm_host_timer(timer_list.lock().next_deadline());
+            break;
+        }
+        budget -= 1;
         let now = default_host().monotonic_time();
         let expired = timer_list.lock().expire_one(now);
         if let Some((deadline, event)) = expired {

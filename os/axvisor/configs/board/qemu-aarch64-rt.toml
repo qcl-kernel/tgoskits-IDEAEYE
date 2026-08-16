@@ -1,0 +1,13 @@
+# Real-time (determinism) board config for AxVisor on qemu-aarch64.
+# See docs/rt-axvisor/ for the RT contract and acceptance metrics.
+#
+# `rt` enables the whole RT hardening feature group (axvm/rt). `vm_configs` is
+# intentionally empty here: the RT-probe guest binary is built and patched in by
+# guests/freertos-rt/setup.sh, which produces
+# os/axvisor/tmp/vmconfigs/freertos-rt-smp1.generated.toml — pass it via --vmconfigs.
+features = [
+    "rt",
+]
+log = "Info"
+target = "aarch64-unknown-none-softfloat"
+vm_configs = []

@@ -1,0 +1,11 @@
+[build]
+target = "aarch64-unknown-none-softfloat"
+
+[target.aarch64-unknown-none-softfloat]
+rustflags = [
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "link-arg=-Map=freertos-rt.map",
+    "-C", "link-arg=--section-start=.vectors=0x40000000",
+    "-C", "link-arg=--section-start=.text=0x40001000",
+    "-C", "link-arg=--section-start=.stats=0x40700000",
+]

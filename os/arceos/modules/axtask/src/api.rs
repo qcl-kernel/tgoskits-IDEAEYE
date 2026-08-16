@@ -312,6 +312,13 @@ pub(crate) fn yield_now_unchecked() {
     current_run_queue::<NoPreemptIrqSave>().yield_current()
 }
 
+/// Marks CPUs (as a bitmask) on which the per-CPU `gc` task must not run its
+/// periodic wake-and-poll loop. Used for CPU partitioning (e.g. a hypervisor
+/// dedicating a physical core to a real-time guest).
+pub fn set_gc_disabled_cpu_mask(mask: usize) {
+    crate::run_queue::set_gc_disabled_cpu_mask(mask)
+}
+
 /// Current task is going to sleep for the given duration.
 ///
 /// If the feature `irq` is not enabled, it uses busy-wait instead.

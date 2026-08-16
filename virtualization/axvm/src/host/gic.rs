@@ -6,7 +6,7 @@ use arm_gic_driver::v3::{
 };
 use ax_memory_addr::{PhysAddr, VirtAddr};
 
-use super::{HostMemory, arceos, default_host};
+use super::{HostCpu, HostMemory, arceos, default_host};
 
 fn with_gic<T>(f: impl FnOnce(&mut rdif_intc::Intc) -> T) -> T {
     let mut gic = rdrive::get_one::<rdif_intc::Intc>()
@@ -145,4 +145,45 @@ pub(crate) fn handle_current_irq() -> Option<usize> {
 
 pub(crate) fn fetch_irq() -> usize {
     handle_current_irq().unwrap_or(0)
+}
+
+/// Routes the EL2 physical timer (CNTHP) PPI to Group 0 on the current CPU's
+/// redistributor, so its FIQ can trap to EL2 during guest execution (host
+/// preemption, `rt-preempt`). The CNTHP PPI is architecturally fixed at PPI 10,
+/// i.e. GIC interrupt ID 26.
+///
+/// # Safety
+///
+/// The host GIC registers are accessed as MMIO through the hypervisor's direct
+/// mapping; the GIC must already be probed by the platform.
+#[cfg(feature = "rt-preempt")]
+pub(crate) fn route_el2_timer_to_group0() {
+    // CNTHP (EL2 physical timer) = PPI 10 = GIC ID 26.
+    const EL2_PHYS_TIMER_GIC_ID: usize = 26;
+    // GICv3 redistributor stride (SGI/PPI frame + VLPI frame).
+    const GICR_STRIDE: usize = 0x2_0000;
+    const GICR_IGROUPR0_OFF: usize = 0x0080;
+    const GICD_CTLR_OFF: usize = 0x0000;
+
+    let cpu_id = default_host().this_cpu_id();
+    let redist = host_gicr_base().as_usize() + cpu_id * GICR_STRIDE;
+
+    // GICR_IGROUPR0: clear the Group-1 bit -> Group 0 for the CNTHP PPI.
+    let igroupr0 = default_host().phys_to_virt(PhysAddr::from(redist + GICR_IGROUPR0_OFF));
+    // SAFETY: MMIO read-modify-write on the host redistributor, Group-0 routing.
+    unsafe {
+        let p = igroupr0.as_usize() as *mut u32;
+        let v = core::ptr::read_volatile(p);
+        core::ptr::write_volatile(p, v & !(1 << EL2_PHYS_TIMER_GIC_ID));
+    }
+
+    // GICD_CTLR: enable Group 0 (bit 0).
+    let gicd_ctlr = default_host().phys_to_virt(PhysAddr::from(host_gicd_base().as_usize() + GICD_CTLR_OFF));
+    // SAFETY: MMIO read-modify-write on the host distributor, EnableGrp0.
+    unsafe {
+        let p = gicd_ctlr.as_usize() as *mut u32;
+        let v = core::ptr::read_volatile(p);
+        core::ptr::write_volatile(p, v | 0x1);
+    }
+    info!("RT: routed EL2 physical timer PPI (GIC ID {EL2_PHYS_TIMER_GIC_ID}) to Group 0 on CPU {cpu_id}");
 }

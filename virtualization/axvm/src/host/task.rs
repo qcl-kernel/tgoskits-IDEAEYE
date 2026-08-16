@@ -22,6 +22,10 @@ pub(crate) fn yield_now() {
     arceos::yield_now();
 }
 
+pub(crate) fn set_gc_disabled_cpu_mask(mask: usize) {
+    arceos::set_gc_disabled_cpu_mask(mask);
+}
+
 pub(crate) fn cpu_mask_from_raw_bits(bits: usize) -> arceos::ArceOsCpuMask {
     arceos::cpu_mask_from_raw_bits(bits)
 }

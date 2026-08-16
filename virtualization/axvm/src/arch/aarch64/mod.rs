@@ -133,6 +133,18 @@ impl ArchOps for Aarch64Arch {
         Ok(ArmVcpuSetupConfig {
             passthrough_interrupt: passthrough,
             passthrough_timer: passthrough,
+            // rt-trim-sysreg implies rt-partition (pinned, no migration); only a
+            // passthrough guest (owns its timers/EL1 state) may use the fast path.
+            #[cfg(feature = "rt-trim-sysreg")]
+            fast_sysreg_save: passthrough,
+            #[cfg(not(feature = "rt-trim-sysreg"))]
+            fast_sysreg_save: false,
+            // rt-preempt traps the host's Group-0 FIQ (EL2 timer) to EL2 so it
+            // can preempt the guest; requires the guest to not use FIQs.
+            #[cfg(feature = "rt-preempt")]
+            trap_fiq_to_el2: passthrough,
+            #[cfg(not(feature = "rt-preempt"))]
+            trap_fiq_to_el2: false,
         })
     }
 
@@ -284,6 +296,12 @@ impl ArchOps for Aarch64Arch {
         }
         Ok(VcpuRunAction::Yield)
     }
+
+    fn on_last_vcpu_exit(_vm_id: usize) {
+        // Print the real-time counters (entry/exit cycles, exit reasons,
+        // wakeup latency) accumulated while the guest ran.
+        crate::dump_rt_instrumentation();
+    }
 }
 
 struct AxvmArmHostOps;
@@ -300,6 +318,17 @@ impl ArmHostOps for AxvmArmHostOps {
 
     fn handle_current_host_irq() {
         gic::handle_current_irq();
+    }
+
+    #[cfg(feature = "rt-cond-flush")]
+    fn vm_flush_state() -> (u64, bool) {
+        let Some(vm_id) = crate::current_vm_id() else {
+            return (u64::MAX, true);
+        };
+        let Some(vm) = crate::get_vm_by_id(vm_id) else {
+            return (u64::MAX, true);
+        };
+        vm.flush_state()
     }
 }
 

@@ -350,4 +350,53 @@ impl GuestSystemRegisters {
             cnthctl_el2: self.cnthctl_el2,
         }
     }
+
+    /// Fast-path store used when `ArmVcpuSetupConfig::fast_sysreg_save` is set:
+    /// only the timer registers (which the host may touch) plus VTTBR/HCR (kept
+    /// current for the entry-time flush decision). Every other EL1 system
+    /// register persists in hardware across EL2 traps for a vCPU that is pinned
+    /// to one physical core and never migrates.
+    ///
+    /// # Safety
+    ///
+    /// Only valid for a non-migrating, passthrough-timer vCPU; see the field
+    /// documentation on `ArmVcpuSetupConfig::fast_sysreg_save`.
+    pub unsafe fn store_fast(&mut self) {
+        unsafe {
+            asm!("mrs {0}, CNTVOFF_EL2", out(reg) self.cntvoff_el2);
+            asm!("mrs {0}, CNTP_CVAL_EL0", out(reg) self.cntp_cval_el0);
+            asm!("mrs {0}, CNTV_CVAL_EL0", out(reg) self.cntv_cval_el0);
+            asm!("mrs {0:x}, CNTKCTL_EL1", out(reg) self.cntkctl_el1);
+            asm!("mrs {0:x}, CNTP_CTL_EL0", out(reg) self.cntp_ctl_el0);
+            asm!("mrs {0:x}, CNTV_CTL_EL0", out(reg) self.cntv_ctl_el0);
+            asm!("mrs {0}, CNTVCT_EL0", out(reg) self.cntvct_el0);
+            asm!("mrs {0}, CNTHCTL_EL2", out(reg) self.cnthctl_el2);
+            asm!("mrs {0}, VMPIDR_EL2", out(reg) self.vmpidr_el2);
+            asm!("mrs {0}, VTTBR_EL2", out(reg) self.vttbr_el2);
+            asm!("mrs {0}, HCR_EL2", out(reg) self.hcr_el2);
+        }
+    }
+
+    /// Fast-path restore paired with [`Self::store_fast`]: writes only the
+    /// timer registers (with the CTL/CVAL ordering that avoids shifting the
+    /// guest timer deadline). VTTBR/HCR are already correct in hardware for a
+    /// pinned vCPU and are not rewritten.
+    ///
+    /// # Safety
+    ///
+    /// See [`Self::store_fast`].
+    pub unsafe fn restore_fast(&self) {
+        unsafe {
+            let timer = self.timer_registers();
+            asm!("msr CNTVOFF_EL2, {0}", in(reg) timer.cntvoff_el2);
+            asm!("msr CNTKCTL_EL1, {0:x}", in (reg) timer.cntkctl_el1);
+            asm!("msr CNTHCTL_EL2, {0}", in(reg) timer.cnthctl_el2);
+            asm!("msr CNTP_CTL_EL0, xzr");
+            asm!("msr CNTV_CTL_EL0, xzr");
+            asm!("msr CNTP_CVAL_EL0, {0}", in(reg) timer.cntp_cval_el0);
+            asm!("msr CNTV_CVAL_EL0, {0}", in(reg) timer.cntv_cval_el0);
+            asm!("msr CNTP_CTL_EL0, {0:x}", in(reg) timer.cntp_ctl_el0);
+            asm!("msr CNTV_CTL_EL0, {0:x}", in(reg) timer.cntv_ctl_el0);
+        }
+    }
 }

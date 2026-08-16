@@ -17,6 +17,32 @@ vmx = ["x86_vcpu/vmx"]
 svm = ["x86_vcpu/svm"]
 sstc = ["riscv_vcpu/sstc"]
 
+# Real-time (determinism) hardening feature group, see docs/rt-axvisor.
+# Each phase is independently buildable and A/B-testable.
+# - rt-instrument:      measurement baseline (exit/entry cycles, exit-reason counters, wakeup latency)
+# - rt-partition:       CPU partitioning, affinity hardening, cooperative yield, gc-off-RT-core
+# - rt-cond-flush:      skip full IC/TLB flush on guest entry when nothing changed
+# - rt-trim-sysreg:     minimal per-cycle sysreg save/restore for partitioned passthrough guests
+# - rt-timer-service:   service the AxVM timer wheel at every guest exit, bounded iteration
+# - rt-lock-opt:        defer/batch TLB maintenance, shrink IRQ-off critical sections
+rt-instrument = ["arm_vcpu/rt-instrument"]
+rt-partition = []
+rt-cond-flush = []
+rt-trim-sysreg = ["rt-partition"]
+rt-timer-service = []
+rt-lock-opt = []
+# Host preemption capability (Phase 6): route the host EL2 timer to Group 0 and
+# trap its FIQ to EL2 during guest execution, paired with axvisor `rt-preempt`.
+rt-preempt = []
+rt = [
+    "rt-instrument",
+    "rt-partition",
+    "rt-cond-flush",
+    "rt-trim-sysreg",
+    "rt-timer-service",
+    "rt-lock-opt",
+]
+
 [dependencies]
 log = "0.4"
 cfg-if = "1.0"

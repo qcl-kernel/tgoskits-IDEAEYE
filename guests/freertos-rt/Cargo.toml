@@ -1,0 +1,21 @@
+[package]
+name = "freertos-rt-probe"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal FreeRTOS-style RT-probe guest for AxVisor (aarch64, EL1, MMU off)"
+publish = false
+
+# Standalone workspace: this crate is intentionally NOT part of the TGOSKits
+# cargo workspace (it is a bare-metal guest, built with its own linker script).
+[workspace]
+
+[dependencies]
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"

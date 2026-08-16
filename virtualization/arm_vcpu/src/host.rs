@@ -18,6 +18,17 @@ pub trait ArmHostOps {
 
     /// Dispatch a host IRQ taken while running at the current exception level.
     fn handle_current_host_irq();
+
+    /// Returns `(nested_mmu_generation, guest_code_dirty)` used at guest entry
+    /// to decide whether a full cache/TLB maintenance is required.
+    ///
+    /// The default is conservatively "always dirty" (`u64::MAX`, `true`), which
+    /// keeps the original always-flush behavior for hosts that do not implement
+    /// generation tracking. A host that opts into the conditional flush (e.g.
+    /// AxVisor's `rt-cond-flush`) returns real state.
+    fn vm_flush_state() -> (u64, bool) {
+        (u64::MAX, true)
+    }
 }
 
 static CURRENT_EL_IRQ_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());

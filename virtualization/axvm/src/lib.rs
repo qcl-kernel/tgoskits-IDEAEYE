@@ -31,6 +31,8 @@ pub mod layout;
 pub mod lifecycle;
 mod manager;
 mod percpu;
+#[cfg(feature = "rt-instrument")]
+pub mod rt_stats;
 mod runtime;
 mod task;
 mod timer;
@@ -78,6 +80,26 @@ pub(crate) type AxVMPerCpu = vcpu::AxPerCpu<arch::ArchPerCpu>;
 /// Check and dispatch pending AxVM timer events on the current CPU.
 pub fn check_timer_events() {
     timer::check_events();
+}
+
+/// Dump the real-time instrumentation counters (no-op unless `rt-instrument`).
+///
+/// Called automatically when the last vCPU of a VM exits on aarch64, and
+/// available for a shell command on other architectures.
+pub fn dump_rt_instrumentation() {
+    #[cfg(feature = "rt-instrument")]
+    rt_stats::dump();
+}
+
+/// Marks CPUs (as a bitmask) on which the per-CPU `gc` task must not run its
+/// periodic wake-and-poll loop. Used for CPU partitioning when a physical core
+/// is dedicated to a real-time guest (see docs/rt-axvisor). No-op unless the
+/// `rt-partition` feature is enabled.
+pub fn set_gc_disabled_cpu_mask(mask: usize) {
+    #[cfg(feature = "rt-partition")]
+    host::task::set_gc_disabled_cpu_mask(mask);
+    #[cfg(not(feature = "rt-partition"))]
+    let _ = mask;
 }
 
 /// Clean data cache lines covering a host virtual address range.

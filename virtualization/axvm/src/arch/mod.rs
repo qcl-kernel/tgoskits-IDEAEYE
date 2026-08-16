@@ -396,6 +396,12 @@ pub(crate) trait ArchOps {
                 crate::runtime::vcpus::inject_pending_interrupts::<Self>(vm.id(), vcpu_id, vcpu);
 
                 let exit = vcpu.run()?;
+                // Service the AxVM timer wheel at every guest exit (including
+                // `Continue` re-entry paths) so host-side virtual timers are
+                // served with bounded latency even in passthrough mode, where
+                // the host tick cannot reach EL2 during guest execution.
+                #[cfg(feature = "rt-timer-service")]
+                crate::check_timer_events();
                 trace!("{exit:#x?}");
                 match Self::handle_vcpu_exit_bound(vm, vcpu, exit)? {
                     BoundVcpuExit::Continue => continue,

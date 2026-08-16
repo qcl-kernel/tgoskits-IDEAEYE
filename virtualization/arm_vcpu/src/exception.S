@@ -76,6 +76,14 @@
     b       .Lexception_return_el2
 .endm
 
+.macro HANDLE_CURRENT_FIQ
+.p2align 7
+    SAVE_REGS_FROM_EL1
+    mov     x0, sp
+    bl      current_el_fiq_handler
+    b       .Lexception_return_el2
+.endm
+
 .macro HANDLE_CURRENT_SYNC
 .p2align 7
     SAVE_REGS_FROM_EL1
@@ -114,7 +122,7 @@ exception_vector_base_vcpu:
     // current EL, with SP_ELx
     HANDLE_CURRENT_SYNC
     HANDLE_CURRENT_IRQ
-    INVALID_EXCP_EL2 2 1
+    HANDLE_CURRENT_FIQ
     INVALID_EXCP_EL2 3 1
 
     // lower EL, aarch64

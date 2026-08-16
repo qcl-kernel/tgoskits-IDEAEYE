@@ -18,6 +18,8 @@ use alloc::format;
     any(target_arch = "x86_64", target_arch = "loongarch64")
 ))]
 use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "rt-partition")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use ax_errno::{AxResult, ax_err_type};
 #[cfg(all(feature = "fs", target_arch = "x86_64"))]
@@ -50,6 +52,11 @@ const DEFAULT_X86_BIOS_LOAD_GPA: usize = 0x8000;
     any(target_arch = "x86_64", target_arch = "loongarch64")
 ))]
 static HOST_FILESYSTEM_RELEASE_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+/// Bitmask of physical cores dedicated to RT guests (derived from every VM's
+/// `phys_cpu_ids`). Used to disable the per-CPU `gc` task on those cores.
+#[cfg(feature = "rt-partition")]
+static RT_VM_CORE_MASK: AtomicUsize = AtomicUsize::new(0);
 
 #[allow(dead_code)]
 pub mod vmcfg {
@@ -116,6 +123,49 @@ pub fn init_guest_vms() {
             error!("Failed to initialize guest VM: {e:?}");
         }
     }
+
+    // CPU partitioning: every physical core used by a (single-vCPU) RT guest is
+    // dedicated to it; disable the per-CPU gc task on those cores so it never
+    // disturbs the guest.
+    #[cfg(feature = "rt-partition")]
+    {
+        let mask = RT_VM_CORE_MASK.load(Ordering::Relaxed);
+        if mask != 0 {
+            info!("RT partition: dedicated core mask {mask:#x}, disabling gc on those cores");
+            axvm::set_gc_disabled_cpu_mask(mask);
+        }
+    }
+}
+
+/// Validates the RT-partition contract for one VM config: exactly one vCPU, and
+/// its physical core(s) must not be shared with any other vCPU.
+#[cfg(feature = "rt-partition")]
+fn check_rt_partition(config: &AxVMCrateConfig) -> AxResult {
+    if config.base.cpu_num != 1 {
+        return Err(ax_err_type!(
+            InvalidInput,
+            format!(
+                "RT-partitioned guest '{}' must have exactly one vCPU (got {})",
+                config.base.name, config.base.cpu_num
+            )
+        ));
+    }
+    let cores: alloc::vec::Vec<usize> = config
+        .base
+        .phys_cpu_ids
+        .clone()
+        .unwrap_or_else(|| (0..config.base.cpu_num).collect());
+    for &c in &cores {
+        let bit = 1usize << c;
+        let prev = RT_VM_CORE_MASK.fetch_or(bit, Ordering::Relaxed);
+        if prev & bit != 0 {
+            return Err(ax_err_type!(
+                AlreadyExists,
+                format!("RT partition conflict: physical core {c} is shared by multiple vCPUs")
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn init_guest_vm(raw_cfg: &str) -> AxResult<usize> {
@@ -123,6 +173,9 @@ pub fn init_guest_vm(raw_cfg: &str) -> AxResult<usize> {
     #[allow(unused_mut)]
     let mut vm_create_config = AxVMCrateConfig::from_toml(raw_cfg)
         .map_err(|e| ax_err_type!(InvalidData, format!("Failed to resolve VM config: {e:?}")))?;
+
+    #[cfg(feature = "rt-partition")]
+    check_rt_partition(&vm_create_config)?;
 
     #[cfg(all(
         feature = "fs",

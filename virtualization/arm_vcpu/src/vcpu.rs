@@ -64,6 +64,18 @@ pub struct ArmVcpu<H: ArmHostOps> {
     /// The MPIDR_EL1 value for the vCPU.
     mpidr: u64,
     _host: PhantomData<fn() -> H>,
+    /// Cached nested-MMU generation / VTTBR / HCR used to decide when a full
+    /// cache/TLB maintenance is needed at guest entry. `last_vttbr == 0` means
+    /// "first run" (always flush).
+    last_vttbr: u64,
+    last_hcr: u64,
+    last_mmu_generation: u64,
+    /// Whether the per-cycle sysreg save/restore may use the fast path
+    /// (set from `ArmVcpuSetupConfig::fast_sysreg_save`).
+    fast_sysreg_save: bool,
+    /// Whether a full store has completed at least once; the fast path is only
+    /// taken after the first full entry/exit.
+    did_full_store: bool,
 }
 
 /// Configuration for creating a new [`ArmVcpu`].
@@ -85,6 +97,17 @@ pub struct ArmVcpuSetupConfig {
     pub passthrough_interrupt: bool,
     /// Should the hypervisor passthrough timers to the guest?
     pub passthrough_timer: bool,
+    /// When `true`, skip the full per-cycle guest system-register save/restore
+    /// and only handle the timer registers (plus VTTBR/HCR for the entry-time
+    /// flush decision). Safe only when the vCPU is pinned to one physical core
+    /// and never migrates, and the guest owns its timers (passthrough). The
+    /// first entry/exit always uses the full path.
+    pub fast_sysreg_save: bool,
+    /// When `true` (host preemption), set `HCR_EL2.FMO` even in passthrough
+    /// mode so the host's Group-0 (FIQ) interrupt — e.g. the EL2 physical timer
+    /// tick — traps to EL2 while the guest's Group-1 IRQs still pass through to
+    /// EL1. Only valid for guests that do not use FIQs.
+    pub trap_fiq_to_el2: bool,
 }
 
 impl<H: ArmHostOps> ArmVcpu<H> {
@@ -99,11 +122,17 @@ impl<H: ArmHostOps> ArmVcpu<H> {
             guest_system_regs: GuestSystemRegisters::default(),
             mpidr: config.mpidr_el1,
             _host: PhantomData,
+            last_vttbr: 0,
+            last_hcr: 0,
+            last_mmu_generation: 0,
+            fast_sysreg_save: false,
+            did_full_store: false,
         })
     }
 
     /// Completes architecture-specific setup.
     pub fn setup(&mut self, config: ArmVcpuSetupConfig) -> ArmVcpuResult {
+        self.fast_sysreg_save = config.fast_sysreg_save;
         self.init_hv(config);
         Ok(())
     }
@@ -134,13 +163,30 @@ impl<H: ArmHostOps> ArmVcpu<H> {
             core::arch::asm!("msr daifset, #2");
         }
 
+        #[cfg(feature = "rt-instrument")]
+        let entry_start = crate::rt_stats::cntpct();
+
         let exit_reason = unsafe {
             self.restore_vm_system_regs();
+            #[cfg(feature = "rt-instrument")]
+            crate::rt_stats::record_entry_cycles(
+                crate::rt_stats::cntpct().wrapping_sub(entry_start),
+            );
             self.run_guest()
         };
 
         let trap_kind = TrapKind::try_from(exit_reason as u8).expect("Invalid TrapKind");
+
+        #[cfg(feature = "rt-instrument")]
+        let exit_start = crate::rt_stats::cntpct();
         let result = self.vmexit_handler(trap_kind);
+        #[cfg(feature = "rt-instrument")]
+        {
+            crate::rt_stats::record_exit_cycles(crate::rt_stats::cntpct().wrapping_sub(exit_start));
+            if let Ok(exit) = &result {
+                crate::rt_stats::record_exit(exit);
+            }
+        }
 
         unsafe {
             core::arch::asm!("msr daifclr, #2");
@@ -223,6 +269,12 @@ impl<H: ArmHostOps> ArmVcpu<H> {
             // - Enable virtual IRQs and trap physical IRQs to EL2.
             // - Disable virtual IRQs and pass through physical IRQs to EL1.
             hcr_el2 += HCR_EL2::IMO::EnableVirtualIRQ + HCR_EL2::FMO::EnableVirtualFIQ;
+        } else if config.trap_fiq_to_el2 {
+            // Host preemption in passthrough: route the host's Group-0 (FIQ)
+            // interrupts to EL2 while keeping the guest's Group-1 IRQs passed
+            // through to EL1. The host tick (CNTHP PPI as a Group-0 FIQ) can then
+            // preempt guest execution. Requires the guest to not use FIQs.
+            hcr_el2 += HCR_EL2::FMO::EnableVirtualFIQ;
         }
 
         self.guest_system_regs.hcr_el2 = hcr_el2.into();
@@ -302,15 +354,44 @@ impl<H: ArmHostOps> ArmVcpu<H> {
                 mov x3, xzr           // Trap nothing from EL1 to El2.
                 msr cptr_el2, x3"
             );
-            self.guest_system_regs.restore();
-            core::arch::asm!(
-                "
-                ic  iallu
-                tlbi	alle2
-                tlbi	alle1         // Flush tlb
-                dsb	nsh
-                isb"
-            );
+            if self.fast_sysreg_save && self.did_full_store {
+                // Fast path: only the timer registers (the EL1 system
+                // registers persist in hardware for a pinned vCPU).
+                self.guest_system_regs.restore_fast();
+            } else {
+                self.guest_system_regs.restore();
+            }
+
+            // Conditional cache/TLB maintenance: skip the full flush when the
+            // embedding VMM reports no nested-MMU change and no guest-code write
+            // since the last entry. The default host state is conservatively
+            // "always dirty", so hosts without generation tracking keep the
+            // original always-flush behavior.
+            let (generation, code_dirty) = H::vm_flush_state();
+            let vttbr = self.guest_system_regs.vttbr_el2;
+            let hcr = self.guest_system_regs.hcr_el2;
+            let full = self.last_vttbr == 0
+                || self.last_vttbr != vttbr
+                || self.last_hcr != hcr
+                || self.last_mmu_generation != generation;
+            if full {
+                core::arch::asm!(
+                    "
+                    ic  iallu
+                    tlbi	alle2
+                    tlbi	alle1         // Flush tlb
+                    dsb	nsh
+                    isb"
+                );
+                self.last_vttbr = vttbr;
+                self.last_hcr = hcr;
+                self.last_mmu_generation = generation;
+            } else if code_dirty {
+                // Only guest code changed: invalidate the I-cache to PoU.
+                // (TLB entries are untouched.)
+                core::arch::asm!("ic iallu
+                                  isb");
+            }
         }
     }
 
@@ -333,7 +414,12 @@ impl<H: ArmHostOps> ArmVcpu<H> {
         unsafe {
             // Store guest system regs. Guest SP_EL0 was already saved into `self.ctx`
             // by the EL2 assembly before host SP_EL0 was restored.
-            self.guest_system_regs.store();
+            if self.fast_sysreg_save && self.did_full_store {
+                self.guest_system_regs.store_fast();
+            } else {
+                self.guest_system_regs.store();
+                self.did_full_store = true;
+            }
         }
 
         let result = match exit_reason {

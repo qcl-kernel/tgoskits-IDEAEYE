@@ -1,0 +1,22 @@
+# RT-probe smoke test (aarch64). The guest runs ~10 s, prints `[RT] ...` lines,
+# then issues PSCI SYSTEM_OFF; the hypervisor prints `RT-STATS:` on the last
+# vCPU exit, which is the success marker.
+args = [
+  "-nographic",
+  "-cpu",
+  "cortex-a72",
+  "-machine",
+  "virt,virtualization=on,gic-version=3",
+  "-smp",
+  "4",
+  "-m",
+  "8g",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+]
+success_regex = [
+  "RT-STATS:",
+]
+to_bin = true
+uefi = false

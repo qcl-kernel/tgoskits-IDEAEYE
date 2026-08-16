@@ -200,6 +200,12 @@ pub(crate) fn yield_now() {
     thread::yield_now();
 }
 
+/// Marks CPUs (as a bitmask) on which the per-CPU `gc` task must not run its
+/// periodic wake-and-poll loop (CPU partitioning for real-time guests).
+pub(crate) fn set_gc_disabled_cpu_mask(mask: usize) {
+    modules::ax_task::set_gc_disabled_cpu_mask(mask);
+}
+
 pub(crate) fn wait_queue_wait_until(
     queue: &api::task::AxWaitQueueHandle,
     condition: impl Fn() -> bool,
@@ -322,6 +328,8 @@ impl HostPlatform for ArceOsHost {
         crate::percpu::init_current_cpu()?;
         crate::percpu::enable_current_cpu()?;
         crate::percpu::mark_cpu_enabled(self.this_cpu_id());
+        #[cfg(all(feature = "rt-preempt", target_arch = "aarch64"))]
+        crate::host::gic::route_el2_timer_to_group0();
         Ok(())
     }
 

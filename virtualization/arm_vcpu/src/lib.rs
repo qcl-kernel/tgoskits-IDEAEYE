@@ -25,6 +25,8 @@ mod exception_utils;
 mod exception;
 pub mod host;
 mod pcpu;
+#[cfg(feature = "rt-instrument")]
+pub mod rt_stats;
 mod smc;
 mod types;
 mod vcpu;

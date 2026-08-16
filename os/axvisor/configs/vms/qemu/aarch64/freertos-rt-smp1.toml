@@ -1,0 +1,31 @@
+# RT-probe FreeRTOS-style guest: single vCPU on dedicated core 1.
+# RT partition contract: one vCPU per dedicated physical core, no host time-slice
+# preemption, guest must trap to EL2 at least every ~1 ms (see docs/rt-axvisor).
+# `kernel_path` is a placeholder; guests/freertos-rt/setup.sh patches it to the
+# absolute path of the built freertos-rt.bin and writes a .generated.toml.
+
+[base]
+id = 1
+name = "freertos-rt"
+vm_type = 1
+cpu_num = 1
+phys_cpu_ids = [1]
+
+[kernel]
+entry_point = 0x4000_1000
+image_location = "memory"
+kernel_load_addr = 0x4000_0000
+kernel_path = "/path/to/freertos-rt.bin"
+dtb_load_addr = 0x47e0_0000
+memory_regions = [
+  [0x4000_0000, 0x0800_0000, 0x7, 0], # System RAM 128M MAP_ALLOC
+]
+
+[devices]
+interrupt_mode = "passthrough"
+emu_devices = []
+passthrough_devices = [
+    ["/"],
+]
+passthrough_addresses = []
+excluded_devices = []

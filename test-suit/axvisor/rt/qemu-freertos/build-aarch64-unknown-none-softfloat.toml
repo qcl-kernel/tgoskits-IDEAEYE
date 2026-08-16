@@ -1,0 +1,10 @@
+# RT-probe test build config (aarch64).
+# Prerequisite: the RT-probe guest must be built and the VM config patched first:
+#   cd <repo>/guests/freertos-rt && ./setup.sh
+# which produces os/axvisor/tmp/vmconfigs/freertos-rt-smp1.generated.toml.
+features = [
+    "rt",
+]
+log = "Info"
+target = "aarch64-unknown-none-softfloat"
+vm_configs = ["os/axvisor/tmp/vmconfigs/freertos-rt-smp1.generated.toml"]

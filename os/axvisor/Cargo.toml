@@ -57,6 +57,12 @@ sdmmc = [
 ]
 rockchip-pm = ["ax-driver/rockchip-pm"]
 stack-protector = ["ax-std/stack-protector"]
+# Real-time (determinism) hardening feature group, see docs/rt-axvisor.
+rt = ["axvm/rt"]
+# Host preemption capability (Phase 6): activates the ArceOS round-robin
+# preemptive scheduler and routes the host EL2 timer to Group 0 (FIQ) so it can
+# preempt guest execution. See docs/rt-axvisor.
+rt-preempt = ["ax-std/sched-rr", "axvm/rt-preempt"]
 
 [dependencies]
 spin = { workspace = true }

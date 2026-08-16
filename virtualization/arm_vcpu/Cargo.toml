@@ -18,6 +18,11 @@ license = "Apache-2.0"
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none-softfloat"]
 
+[features]
+# Real-time instrumentation: exit/entry cycle timestamps and exit-reason counters
+# for determinism measurement (see docs/rt-axvisor). Off by default, no runtime cost.
+rt-instrument = []
+
 [dependencies]
 log = "0.4"
 spin = { workspace = true }

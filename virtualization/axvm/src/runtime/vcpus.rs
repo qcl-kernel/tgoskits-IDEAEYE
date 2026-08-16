@@ -99,6 +99,8 @@ pub(crate) fn queue_interrupt(vm_id: usize, vcpu_id: usize, vector: usize) -> Ax
         runtime.notify_all();
         Ok(())
     })?;
+    #[cfg(feature = "rt-instrument")]
+    crate::rt_stats::stamp_wake_queued();
     crate::host::task::send_ipi(cpu_id);
     Ok(())
 }
@@ -304,7 +306,14 @@ fn vcpu_run() {
         CurrentArch::before_vcpu_run(&vm, &vcpu);
 
         match CurrentArch::run_vcpu(&vm, &vcpu) {
-            Ok(VcpuRunAction::Yield) => {}
+            Ok(VcpuRunAction::Yield) => {
+                // Cooperative fairness at guest-exit boundaries: let other tasks
+                // on this core run between guest exits. On a partitioned RT core
+                // (only the vCPU + idle are runnable) this is a constant-time
+                // no-op; on a shared core it prevents starving gc/shell.
+                #[cfg(feature = "rt-partition")]
+                crate::host::task::yield_now();
+            }
             Ok(VcpuRunAction::Wait) => wait(&runtime),
             Ok(VcpuRunAction::Stop(reason)) => {
                 if let Err(err) = vm.stop(reason) {
@@ -321,6 +330,11 @@ fn vcpu_run() {
                 notify_all_vcpus(vm_id);
             }
         }
+
+        // Fold any queued-interrupt wakeup latency now that this vCPU has
+        // processed the exit boundary.
+        #[cfg(feature = "rt-instrument")]
+        crate::rt_stats::record_wake_latency();
 
         // Check if the VM is suspended
         if vm.suspending() {

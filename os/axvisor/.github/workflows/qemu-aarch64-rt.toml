@@ -1,0 +1,23 @@
+# Minimal QEMU config for the real-time (RT) probe runs.
+# The RT board config (configs/board/qemu-aarch64-rt.toml) has no `fs`/virtio-blk,
+# so no rootfs drive is attached. The guest uses the passed-through PL011 UART
+# and needs >= 2 cores (freertos-rt-smp1.toml pins phys_cpu_ids = [1]).
+args = [
+  "-nographic",
+  "-cpu",
+  "cortex-a72",
+  "-machine",
+  "virt,virtualization=on,gic-version=3",
+  "-smp",
+  "4",
+  "-m",
+  "8g",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+]
+success_regex = [
+  "RT-STATS:",
+]
+to_bin = true
+uefi = false

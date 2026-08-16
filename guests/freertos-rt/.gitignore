@@ -1,0 +1,4 @@
+# Build artifacts (guest binary + linker map + cargo outputs)
+/target/
+/freertos-rt.bin
+/freertos-rt.map

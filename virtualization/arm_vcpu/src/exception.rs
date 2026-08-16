@@ -290,6 +290,14 @@ fn current_el_irq_handler(_tf: &mut TrapFrame) {
     crate::host::handle_current_host_irq()
 }
 
+/// Handles FIQ exceptions from the current exception level. Used to service the
+/// host's Group-0 interrupts (e.g. the EL2 physical timer tick) while a guest is
+/// running in passthrough mode with `trap_fiq_to_el2`.
+#[unsafe(no_mangle)]
+fn current_el_fiq_handler(_tf: &mut TrapFrame) {
+    crate::host::handle_current_host_irq()
+}
+
 /// Handles synchronous exceptions that occur from the current exception level.
 #[unsafe(no_mangle)]
 fn current_el_sync_handler(tf: &mut TrapFrame) {

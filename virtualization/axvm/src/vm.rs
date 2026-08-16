@@ -15,7 +15,7 @@
 use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use core::{
     alloc::Layout,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use ax_cpumask::CpuMask;
@@ -121,6 +121,12 @@ pub(crate) struct AxVMResources {
     interrupt_fabric: Option<InterruptFabric>,
     address_layout: Option<VmAddressLayout>,
     boot_description: GuestBootDescription,
+    /// Monotonic counter bumped on every nested-MMU (stage-2) mapping change;
+    /// read at guest entry to decide whether a full TLB maintenance is needed.
+    nested_mmu_generation: AtomicU64,
+    /// Set when the host writes guest memory that may be executed (image/DTB
+    /// load, write_to_guest); cleared by the entry-time I-cache flush.
+    guest_code_dirty: AtomicBool,
 }
 
 unsafe impl Send for AxVMResources {}
@@ -283,7 +289,35 @@ impl AxVMResources {
             interrupt_fabric: None,
             address_layout: None,
             boot_description: GuestBootDescription::none(),
+            nested_mmu_generation: AtomicU64::new(0),
+            guest_code_dirty: AtomicBool::new(false),
         })
+    }
+
+    /// Marks that the nested-MMU mappings changed; the next guest entry must
+    /// perform a TLB maintenance. Release ordering pairs with the Acquire read
+    /// in `take_flush_state`.
+    #[cfg(feature = "rt-cond-flush")]
+    pub(crate) fn bump_nested_mmu_generation(&self) {
+        self.nested_mmu_generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Marks that the host wrote guest memory that may be executed.
+    #[cfg(feature = "rt-cond-flush")]
+    pub(crate) fn mark_guest_code_dirty(&self) {
+        self.guest_code_dirty.store(true, Ordering::Release);
+    }
+
+    /// Returns (nested-mmu generation, guest-code-dirty) for the entry-time
+    /// cache/TLB decision, consuming the code-dirty flag. The caller performs
+    /// an I-cache flush iff `true`; the full flush covers it when the generation
+    /// also changed. Only the single vCPU that owns this VM's core reads it.
+    #[cfg(feature = "rt-cond-flush")]
+    pub(crate) fn take_flush_state(&self) -> (u64, bool) {
+        (
+            self.nested_mmu_generation.load(Ordering::Acquire),
+            self.guest_code_dirty.swap(false, Ordering::AcqRel),
+        )
     }
 
     fn vcpu_list(&self) -> AxResult<&[AxVCpuRef]> {
@@ -1006,6 +1040,8 @@ impl AxVM {
     ) -> AxResult {
         self.with_resources_mut(|resources| {
             resources.address_space.map_linear(gpa, hpa, size, flags)?;
+            #[cfg(feature = "rt-cond-flush")]
+            resources.bump_nested_mmu_generation();
             Ok(())
         })
     }
@@ -1014,8 +1050,19 @@ impl AxVM {
     pub fn unmap_region(&self, gpa: GuestPhysAddr, size: usize) -> AxResult {
         self.with_resources_mut(|resources| {
             resources.address_space.unmap(gpa, size)?;
+            #[cfg(feature = "rt-cond-flush")]
+            resources.bump_nested_mmu_generation();
             Ok(())
         })
+    }
+
+    /// Returns the current nested-MMU generation and consumes the guest-code
+    /// dirty flag, used at guest entry to decide whether a full cache/TLB
+    /// maintenance is needed. `u64::MAX`/`true` on failure (conservative).
+    #[cfg(feature = "rt-cond-flush")]
+    pub(crate) fn flush_state(&self) -> (u64, bool) {
+        self.with_resources(|resources| Ok(resources.take_flush_state()))
+            .unwrap_or((u64::MAX, true))
     }
 
     /// Reads an object of type `T` from the guest physical address.
@@ -1066,14 +1113,16 @@ impl AxVM {
 
     /// Reads raw bytes from guest physical memory.
     pub fn read_from_guest(&self, gpa_ptr: GuestPhysAddr, buffer: &mut [u8]) -> AxResult {
-        self.with_resources(|resources| {
-            let Some(chunks) = resources
-                .address_space
-                .translated_byte_buffer(gpa_ptr, buffer.len())
-            else {
-                return ax_err!(InvalidInput, "Failed to translate guest physical address");
-            };
-
+        #[cfg(feature = "rt-lock-opt")]
+        {
+            // Translate to host-VA chunks under the short lock, then copy
+            // outside the lock so a large guest read does not hold IRQs off
+            // for the whole copy. Safe for the single-vCPU RT guests this
+            // feature targets: the mapping cannot change concurrently within
+            // one vCPU task.
+            let chunks = self
+                .with_resources(|r| Ok(r.address_space.translated_byte_buffer(gpa_ptr, buffer.len())))?
+                .ok_or_else(|| ax_err!(InvalidInput, "Failed to translate guest physical address"))?;
             let mut copied = 0;
             for chunk in chunks {
                 let len = (buffer.len() - copied).min(chunk.len());
@@ -1083,12 +1132,37 @@ impl AxVM {
                     return Ok(());
                 }
             }
-
-            ax_err!(
+            return ax_err!(
                 InvalidInput,
                 "Insufficient guest memory to read the requested buffer"
-            )
-        })
+            );
+        }
+        #[cfg(not(feature = "rt-lock-opt"))]
+        {
+            self.with_resources(|resources| {
+                let Some(chunks) = resources
+                    .address_space
+                    .translated_byte_buffer(gpa_ptr, buffer.len())
+                else {
+                    return ax_err!(InvalidInput, "Failed to translate guest physical address");
+                };
+
+                let mut copied = 0;
+                for chunk in chunks {
+                    let len = (buffer.len() - copied).min(chunk.len());
+                    buffer[copied..copied + len].copy_from_slice(&chunk[..len]);
+                    copied += len;
+                    if copied == buffer.len() {
+                        return Ok(());
+                    }
+                }
+
+                ax_err!(
+                    InvalidInput,
+                    "Insufficient guest memory to read the requested buffer"
+                )
+            })
+        }
     }
 
     /// Writes an object of type `T` to the guest physical address.
@@ -1105,16 +1179,36 @@ impl AxVM {
             return Ok(());
         }
 
-        self.with_resources(|resources| {
-            let Some(mut chunks) = resources
-                .address_space
-                .translated_byte_buffer(gpa_ptr, data.len())
-            else {
-                return ax_err!(InvalidInput, "Failed to translate guest physical address");
-            };
-
+        #[cfg(feature = "rt-lock-opt")]
+        {
+            // Translate under the short lock (also marking the I-cache dirty),
+            // then copy outside the lock. See `read_from_guest`.
+            let chunks = self
+                .with_resources(|r| {
+                    #[cfg(feature = "rt-cond-flush")]
+                    r.mark_guest_code_dirty();
+                    Ok(r.address_space.translated_byte_buffer(gpa_ptr, data.len()))
+                })?
+                .ok_or_else(|| ax_err!(InvalidInput, "Failed to translate guest physical address"))?;
             write_guest_bytes_to_chunks(chunks.as_mut_slice(), data)
-        })
+        }
+        #[cfg(not(feature = "rt-lock-opt"))]
+        {
+            self.with_resources(|resources| {
+                let Some(mut chunks) = resources
+                    .address_space
+                    .translated_byte_buffer(gpa_ptr, data.len())
+                else {
+                    return ax_err!(InvalidInput, "Failed to translate guest physical address");
+                };
+
+                // The host is writing guest memory that the guest may execute; the
+                // next guest entry must invalidate the I-cache.
+                #[cfg(feature = "rt-cond-flush")]
+                resources.mark_guest_code_dirty();
+                write_guest_bytes_to_chunks(chunks.as_mut_slice(), data)
+            })
+        }
     }
 
     /// Allocates an IVC channel for inter-VM communication region.

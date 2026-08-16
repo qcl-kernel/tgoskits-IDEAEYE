@@ -202,6 +202,18 @@ impl ptg::TableMeta for A64HVPagingMetaDataL3 {
     const STRICT_ADDRESS_WIDTH: bool = true;
 
     fn flush(vaddr: Option<ptg::VirtAddr>) {
+        // rt-lock-opt defers the stage-2 TLB maintenance to the next guest
+        // entry: the entry-time conditional flush (arch/mod.rs run_vcpu, driven
+        // by the nested-MMU generation bump in map_region/unmap_region)
+        // invalidates the vCPU core's stage-2 TLB before the guest can observe
+        // the new mappings. Safe only in the single-vCPU RT partition model,
+        // where no other core translates this guest's IPAs.
+        #[cfg(feature = "rt-lock-opt")]
+        {
+            let _ = vaddr;
+            return;
+        }
+        #[cfg(not(feature = "rt-lock-opt"))]
         // SAFETY: TLBI operations only invalidate stage-2 translations for the
         // current EL2 context; they do not dereference memory.
         unsafe {
