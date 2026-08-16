@@ -148,7 +148,7 @@ mod tests {
     fn config_with_ivc() -> AxVMConfig {
         AxVMConfig::new(AxVMConfigParams {
             id: 1,
-            phys_cpu_ls: PhysCpuList::new(1, None, None),
+            phys_cpu_ls: PhysCpuList::new(1, None, None, None),
             virtual_device_catalog: registered_catalog(),
             memory_regions: vec![VmMemConfig {
                 gpa: 0x8000_0000,
@@ -269,7 +269,7 @@ mod tests {
     fn fixed_mmio_inside_guest_memory_is_rejected() {
         let config = AxVMConfig::new(AxVMConfigParams {
             id: 1,
-            phys_cpu_ls: PhysCpuList::new(1, None, None),
+            phys_cpu_ls: PhysCpuList::new(1, None, None, None),
             memory_regions: vec![VmMemConfig {
                 gpa: 0x8000_0000,
                 size: 0x2000,
