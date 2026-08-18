@@ -44,6 +44,13 @@ impl AxvmManager {
     /// Wait until every running VM has stopped.
     pub fn wait_for_default_vms() {
         AxvmRuntime::wait_for_all_vms();
+        // Print per-CPU wake-to-run latency statistics collected by the
+        // `sched-latency` instrumentation inside axtask.
+        #[cfg(feature = "sched-latency")]
+        {
+            info!("[Axvisor] Host scheduler wake-to-run latency statistics:");
+            ax_std::os::arceos::modules::ax_task::print_sched_latency_stats();
+        }
     }
 
     /// Create one VM from a TOML config string.
