@@ -768,6 +768,30 @@ pub(crate) fn axtask_api_type_aliases_hold_for_test() -> bool {
     true
 }
 
+/// Prints per-CPU scheduler wake-latency statistics.
+///
+/// Available only with the "sched-latency" feature. For each CPU with at least
+/// one recorded wake, logs the number of wakes and the max / average
+/// wake-to-schedule latency in microseconds.
+#[cfg(feature = "sched-latency")]
+#[cfg_attr(doc, doc(cfg(feature = "sched-latency")))]
+pub fn print_sched_latency_stats() {
+    use crate::run_queue::{SCHED_LATENCY_COUNT, SCHED_LATENCY_MAX_NS, SCHED_LATENCY_SUM_NS};
+    for cpu in 0..crate::build_info::CPU_CAPACITY {
+        let count = SCHED_LATENCY_COUNT[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        if count == 0 {
+            continue;
+        }
+        let max = SCHED_LATENCY_MAX_NS[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        let sum = SCHED_LATENCY_SUM_NS[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        info!(
+            "sched-latency cpu{cpu}: wake_count={count} max={}us avg={}us",
+            max / 1000,
+            (sum / count) / 1000
+        );
+    }
+}
+
 #[cfg(axtest)]
 pub(crate) fn axtask_api_scheduler_name_hold_for_test() -> bool {
     // Test that Scheduler::scheduler_name() returns a non-empty string
