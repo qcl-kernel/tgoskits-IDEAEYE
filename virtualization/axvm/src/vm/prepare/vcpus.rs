@@ -12,6 +12,7 @@ pub(crate) struct VcpuPlacement {
     pub(crate) id: usize,
     pub(crate) phys_cpu_set: Option<usize>,
     pub(crate) phys_cpu_id: usize,
+    pub(crate) priority: Option<isize>,
 }
 
 pub(crate) struct PreparedVcpus {
@@ -46,6 +47,7 @@ impl PreparedVcpus {
                 vm_id,
                 placement.id,
                 placement.phys_cpu_set,
+                placement.priority,
                 arch_config,
             )?));
         }
@@ -93,6 +95,7 @@ impl<'a> IntoIterator for &'a PreparedVcpus {
 
 impl AxVMResources {
     pub(crate) fn vcpu_placements(&self) -> Vec<VcpuPlacement> {
+        let priorities = self.config.phys_cpu_ls.vcpu_priorities();
         self.config
             .phys_cpu_ls
             .get_vcpu_affinities_pcpu_ids()
@@ -101,6 +104,9 @@ impl AxVMResources {
                 id,
                 phys_cpu_set,
                 phys_cpu_id,
+                priority: priorities
+                    .as_ref()
+                    .and_then(|prios| prios.get(id).copied()),
             })
             .collect()
     }

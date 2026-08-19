@@ -54,6 +54,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(feature = "sched-cfs")] {
         pub(crate) type AxTask = ax_sched::CFSTask<TaskInner>;
         pub(crate) type Scheduler = ax_sched::CFScheduler<TaskInner>;
+    } else if #[cfg(feature = "sched-rt")] {
+        pub(crate) type AxTask = ax_sched::RTTask<TaskInner>;
+        pub(crate) type Scheduler = ax_sched::RTScheduler<TaskInner>;
     } else {
         // If no scheduler features are set, use FIFO as the default.
         pub(crate) type AxTask = ax_sched::FifoTask<TaskInner>;
@@ -294,15 +297,42 @@ where
 
 /// Set the priority for current task.
 ///
-/// The range of the priority is dependent on the underlying scheduler. For
-/// example, in the [CFS] scheduler, the priority is the nice value, ranging from
-/// -20 to 19.
+/// The semantics of the priority value depend on the underlying scheduler:
+/// - **CFS**: nice value ranging from -20 to 19 (lower = higher priority).
+/// - **RT**: priority where higher numbers mean higher priority (FreeRTOS convention).
 ///
 /// Returns `true` if the priority is set successfully.
-///
-/// [CFS]: https://en.wikipedia.org/wiki/Completely_Fair_Scheduler
 pub fn set_priority(prio: isize) -> bool {
     current_run_queue::<PreemptIrqSaveState>().set_current_priority(prio)
+}
+
+/// Sets the scheduling priority for a specific task.
+///
+/// Unlike [`set_priority`], which only affects the current task, this targets
+/// an arbitrary task reference. It is primarily used by the `initialize`
+/// callback of [`spawn_task_with`] to publish a real-time priority before the
+/// task is added to the run queue.
+///
+/// The priority semantics follow the underlying scheduler:
+/// - **RT**: higher numbers mean higher priority (FreeRTOS convention).
+///
+/// Returns `true` if the priority is set successfully. With schedulers that do
+/// not support per-task priorities (e.g. the default FIFO scheduler), this
+/// function logs a warning and returns `false`.
+pub fn set_task_priority(task: &AxTaskRef, prio: isize) -> bool {
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "sched-rt")] {
+            task.set_priority(prio);
+            true
+        } else {
+            warn!(
+                "set_task_priority is not supported by the current scheduler (task {}, requested priority {})",
+                task.id_name(),
+                prio
+            );
+            false
+        }
+    }
 }
 
 /// Set the affinity for the current task.
@@ -732,6 +762,30 @@ pub(crate) fn axtask_api_type_aliases_hold_for_test() -> bool {
     let _weak_check: Option<super::WeakAxTaskRef> = None;
 
     true
+}
+
+/// Prints per-CPU scheduler wake-latency statistics.
+///
+/// Available only with the "sched-latency" feature. For each CPU with at least
+/// one recorded wake, logs the number of wakes and the max / average
+/// wake-to-schedule latency in microseconds.
+#[cfg(feature = "sched-latency")]
+#[cfg_attr(doc, doc(cfg(feature = "sched-latency")))]
+pub fn print_sched_latency_stats() {
+    use crate::run_queue::{SCHED_LATENCY_COUNT, SCHED_LATENCY_MAX_NS, SCHED_LATENCY_SUM_NS};
+    for cpu in 0..crate::build_info::CPU_CAPACITY {
+        let count = SCHED_LATENCY_COUNT[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        if count == 0 {
+            continue;
+        }
+        let max = SCHED_LATENCY_MAX_NS[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        let sum = SCHED_LATENCY_SUM_NS[cpu].load(core::sync::atomic::Ordering::Relaxed);
+        info!(
+            "sched-latency cpu{cpu}: wake_count={count} max={}us avg={}us",
+            max / 1000,
+            (sum / count) / 1000
+        );
+    }
 }
 
 #[cfg(axtest)]
