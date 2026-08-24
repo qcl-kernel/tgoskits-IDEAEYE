@@ -475,6 +475,7 @@ pub struct PhysCpuList {
     cpu_num: usize,
     phys_cpu_ids: Option<Vec<usize>>,
     phys_cpu_sets: Option<Vec<usize>>,
+    phys_cpu_priorities: Option<Vec<isize>>,
 }
 
 impl PhysCpuList {
@@ -488,7 +489,17 @@ impl PhysCpuList {
             cpu_num,
             phys_cpu_ids,
             phys_cpu_sets,
+            phys_cpu_priorities: None,
         }
+    }
+
+    /// Sets the vCPU priorities of this physical CPU list.
+    ///
+    /// Priorities are optional; when unset, every vCPU inherits the default
+    /// priority. Higher numbers mean higher priority (FreeRTOS convention).
+    pub fn with_cpu_priorities(mut self, phys_cpu_priorities: Option<Vec<isize>>) -> Self {
+        self.phys_cpu_priorities = phys_cpu_priorities;
+        self
     }
 
     /// Returns vCpu id list and its corresponding pCpu affinity list, as well as its physical id.
@@ -528,6 +539,23 @@ impl PhysCpuList {
     /// Returns the physical CPU sets.
     pub fn phys_cpu_sets(&self) -> &Option<Vec<usize>> {
         &self.phys_cpu_sets
+    }
+
+    /// Returns the vCPU scheduling priorities, indexed by vCPU id.
+    ///
+    /// Returns `None` if the priorities are not set, or if the number of vCPUs
+    /// does not match the length of the configured priority list.
+    pub fn vcpu_priorities(&self) -> Option<Vec<isize>> {
+        if let Some(priorities) = &self.phys_cpu_priorities
+            && self.cpu_num != priorities.len()
+        {
+            error!(
+                "ERROR!!!: cpu_num: {}, phys_cpu_priorities: {:?}",
+                self.cpu_num, self.phys_cpu_priorities
+            );
+            return None;
+        }
+        self.phys_cpu_priorities.clone()
     }
 
     /// Sets the guest CPU sets.

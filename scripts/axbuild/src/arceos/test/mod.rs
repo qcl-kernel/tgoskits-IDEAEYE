@@ -48,6 +48,7 @@ const ARCEOS_RUST_QEMU_FEATURES: &[&str] = &[
     "sched-cfs",
     "sched-rr",
     "task-affinity",
+    "task-cyclictest",
     "task-ipi",
     "task-irq",
     "task-parallel",

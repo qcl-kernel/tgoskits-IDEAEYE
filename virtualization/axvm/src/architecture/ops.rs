@@ -163,8 +163,13 @@ pub(crate) trait ArchOps {
             }
         }
 
-        let run_result = vcpu.with_current_cpu_set(|| -> AxVmResult<_> {
-            loop {
+        let run_result = loop {
+            // Host-side exit dispatch (MMIO, hypercalls, GIC interface, ...) may
+            // block on host locks (e.g. the guest console multiplexer), so the
+            // preemption guard is released before dispatch. Only the guest run
+            // itself and its interrupt/timer preparation need the CPU pin and
+            // the current-vCPU publication.
+            let run_outcome = vcpu.with_current_cpu_set(|| -> AxVmResult<_> {
                 crate::runtime::vcpus::inject_pending_interrupts::<Self>(vm.id(), vcpu_id, vcpu);
 
                 drain_and_inject_dispatched_interrupts::<Self>(vm, vcpu_id, vcpu);
@@ -172,14 +177,22 @@ pub(crate) trait ArchOps {
                 Self::before_vcpu_run(vm, vcpu)?;
                 let exit = vcpu.run();
                 Self::after_vcpu_run(vm, vcpu);
-                let exit = exit?;
-                trace!("{exit:#x?}");
-                match Self::handle_vcpu_exit_bound(vm, vcpu, exit)? {
-                    BoundVcpuExit::Continue => continue,
-                    action => break Ok(action),
-                }
+                exit
+            });
+            let exit = match run_outcome {
+                Ok(exit) => exit,
+                Err(err) => break Err(err),
+            };
+            trace!("{exit:#x?}");
+            let action = match Self::handle_vcpu_exit_bound(vm, vcpu, exit) {
+                Ok(action) => action,
+                Err(err) => break Err(err),
+            };
+            match action {
+                BoundVcpuExit::Continue => continue,
+                action => break Ok(action),
             }
-        });
+        };
 
         let unbind_result = vcpu.unbind();
         match run_result {
@@ -427,7 +440,7 @@ mod tests {
     #[test]
     fn inject_vcpu_interrupt_preserves_level_trigger_at_backend_boundary() {
         let injections = Arc::new(IrqSafeMutex::new(InjectionLog::default()));
-        let vcpu = AxVCpu::<RecordingVcpu>::new(1, 0, None, injections.clone()).unwrap();
+        let vcpu = AxVCpu::<RecordingVcpu>::new(1, 0, None, None, injections.clone()).unwrap();
         let interrupt = PendingVcpuInterrupt {
             id: VirtualInterruptId(0x31),
             trigger: InterruptTriggerMode::LevelTriggered,
@@ -450,7 +463,7 @@ mod tests {
             failing_vector: Some(0x42),
             ..Default::default()
         }));
-        let vcpu = AxVCpu::<RecordingVcpu>::new(1, 0, None, injections.clone()).unwrap();
+        let vcpu = AxVCpu::<RecordingVcpu>::new(1, 0, None, None, injections.clone()).unwrap();
         let dispatcher = crate::runtime::VcpuIrqDispatcher::new();
         dispatcher.register_test_vcpu(0, 2);
         for interrupt in [
