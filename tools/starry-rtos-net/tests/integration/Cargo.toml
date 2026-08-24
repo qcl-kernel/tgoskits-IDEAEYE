@@ -1,0 +1,10 @@
+[package]
+name = "integration"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Host loopback integration tests for the AXNET/1 client and protocol"
+
+[dev-dependencies]
+axnet1 = { workspace = true }
+starry-client = { path = "../../crates/starry-client" }
