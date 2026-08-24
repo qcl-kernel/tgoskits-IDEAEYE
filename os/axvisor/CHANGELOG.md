@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/rcore-os/tgoskits/compare/axvisor-v0.5.24...axvisor-v0.6.0) - 2026-08-20
+
+### Added
+
+- *(axvisor)* axum management HTTP control plane with VM lifecycle API ([#1909](https://github.com/rcore-os/tgoskits/pull/1909))
+- *(axvisor)* Implement inter-VM communication (IVC) demo and protocol enhancements ([#1834](https://github.com/rcore-os/tgoskits/pull/1834))
+- *(axvirtio-blk)* add virtio-mmio block device core ([#1935](https://github.com/rcore-os/tgoskits/pull/1935))
+- *(axvisor)* add dual-guest virtio-net support ([#1927](https://github.com/rcore-os/tgoskits/pull/1927))
+
+### Fixed
+
+- *(console)* unify sleepable runtime console arbitration ([#2113](https://github.com/rcore-os/tgoskits/pull/2113))
+- *(axdevice)* [**breaking**] bind device access to the issuing vCPU ([#2092](https://github.com/rcore-os/tgoskits/pull/2092))
+- *(axvisor)* avoid nested locks in vm show ([#2020](https://github.com/rcore-os/tgoskits/pull/2020))
+- *(ax-hal)* normalize hypervisor IRQ entry state ([#1949](https://github.com/rcore-os/tgoskits/pull/1949))
+- *(ax-std)* implement futimens for regular files ([#1950](https://github.com/rcore-os/tgoskits/pull/1950))
+- *(axvisor)* improve multi-VM guest console multiplexing ([#1912](https://github.com/rcore-os/tgoskits/pull/1912))
+
+### Other
+
+- *(axtest)* standardize Cargo and QEMU test flow ([#2088](https://github.com/rcore-os/tgoskits/pull/2088))
+- Refactor image storage and update CI output directory options ([#2025](https://github.com/rcore-os/tgoskits/pull/2025))
+- *(errors)* introduce domain-owned error boundaries ([#2024](https://github.com/rcore-os/tgoskits/pull/2024))
+- *(axvisor)* remove obsolete defconfig.toml ([#1972](https://github.com/rcore-os/tgoskits/pull/1972))
+- *(axvm)* layer RISC-V SBI IPI routing ([#1920](https://github.com/rcore-os/tgoskits/pull/1920))
+
+## [0.5.24](https://github.com/rcore-os/tgoskits/compare/axvisor-v0.5.23...axvisor-v0.5.24) - 2026-08-09
+
+### Added
+
+- *(axvisor)* build VMs from a resolved device graph ([#1718](https://github.com/rcore-os/tgoskits/pull/1718))
+- *(axvisor)* support ROCK 4D guest boot ([#1880](https://github.com/rcore-os/tgoskits/pull/1880))
+- *(axvisor)* adopt shlex command tokenization ([#1862](https://github.com/rcore-os/tgoskits/pull/1862))
+
+### Fixed
+
+- *(riscv-vcpu)* handle virtual interrupt injection for SMP guests ([#1681](https://github.com/rcore-os/tgoskits/pull/1681))
+- *(axvisor)* correct shell filesystem command handling ([#1616](https://github.com/rcore-os/tgoskits/pull/1616))
+- *(axloader)* tighten HTTP boot kernel URL validation ([#1882](https://github.com/rcore-os/tgoskits/pull/1882))
+- *(axvisor)* correct cargo commands and update image layout in scripts and docs ([#1607](https://github.com/rcore-os/tgoskits/pull/1607))
+
+### Other
+
+- *(axbuild)* reuse ostool OVMF assets and paths ([#1917](https://github.com/rcore-os/tgoskits/pull/1917))
+- *(axvisor)* clean up host dependencies ([#1861](https://github.com/rcore-os/tgoskits/pull/1861))
+- *(axvisor)* remove NimbOS guest, legacy CI, and standalone scripts ([#1866](https://github.com/rcore-os/tgoskits/pull/1866))
+- *(repo)* unify workspace dependencies ([#1860](https://github.com/rcore-os/tgoskits/pull/1860))
+- *(axvm)* unify guest devices and AArch64 timer ownership ([#1717](https://github.com/rcore-os/tgoskits/pull/1717))
+
+## [0.5.23](https://github.com/rcore-os/tgoskits/compare/axvisor-v0.5.22...axvisor-v0.5.23) - 2026-08-03
+
+### Added
+
+- *(ahci-driver)* add portable multi-disk AHCI support ([#1795](https://github.com/rcore-os/tgoskits/pull/1795))
+- *(axvisor)* add optional panic backtrace via axbacktrace + std::panic::set_hook ([#1653](https://github.com/rcore-os/tgoskits/pull/1653))
+- *(axvisor)* support StarryOS guest on Orange Pi 5 Plus ([#1684](https://github.com/rcore-os/tgoskits/pull/1684))
+
+### Fixed
+
+- *(axhvc)* handle PSCI_VERSION hypercall ([#1692](https://github.com/rcore-os/tgoskits/pull/1692))
+- *(axvisor)* standalone xtask CLI compatibility ([#1651](https://github.com/rcore-os/tgoskits/pull/1651))
+
+### Other
+
+- virtualize AArch64 physical timer state ([#1770](https://github.com/rcore-os/tgoskits/pull/1770))
+- *(block)* adopt IRQ-driven multi-queue runtime ([#1768](https://github.com/rcore-os/tgoskits/pull/1768))
+- *(qemu)* migrate block devices to NVMe ([#1784](https://github.com/rcore-os/tgoskits/pull/1784))
+- *(axvisor)* implement unified emulated device framework ([#1722](https://github.com/rcore-os/tgoskits/pull/1722))
+
+## [0.5.22](https://github.com/rcore-os/tgoskits/compare/axvisor-v0.5.21...axvisor-v0.5.22) - 2026-07-23
+
+### Added
+
+- *(axvisor)* Enhance AxLoader and Asus NUC15CRH support with fixes ([#1555](https://github.com/rcore-os/tgoskits/pull/1555))
+
+### Fixed
+
+- *(doc)* correct broken Quick Start hyperlink in axvisor READMEs ([#1605](https://github.com/rcore-os/tgoskits/pull/1605))
+
+### Other
+
+- *(cpu-local)* extract per-CPU register ownership ([#1662](https://github.com/rcore-os/tgoskits/pull/1662))
+- *(x86_vcpu)* select VMX/SVM backend at runtime from CPUID, rem… ([#1629](https://github.com/rcore-os/tgoskits/pull/1629))
+- *(axbuild)* 将构建与启动能力收敛到显式配置 ([#1620](https://github.com/rcore-os/tgoskits/pull/1620))
+- *(axvmconfig)* introduce configuration errors ([#1597](https://github.com/rcore-os/tgoskits/pull/1597))
+- *(axvm)* introduce typed domain errors ([#1590](https://github.com/rcore-os/tgoskits/pull/1590))
+- *(axvm)* consolidate architecture-specific code ([#1562](https://github.com/rcore-os/tgoskits/pull/1562))
+
+## [0.5.21](https://github.com/rcore-os/tgoskits/compare/axvisor-v0.5.20...axvisor-v0.5.21) - 2026-07-10
+
+### Other
+
+- updated the following local packages: ax-driver, axplat-dyn, axplat-dyn, ax-hal, axvm, axbuild, ax-std
+
+## [0.5.20](https://github.com/rcore-os/tgoskits/compare/axvisor-v0.5.19...axvisor-v0.5.20) - 2026-07-08
+
+### Other
+
+- updated the following local packages: axplat-dyn, axplat-dyn, ax-hal, axbuild, ax-driver, ax-std, axvm
+
 ## [0.5.19](https://github.com/rcore-os/tgoskits/compare/axvisor-v0.5.18...axvisor-v0.5.19) - 2026-07-08
 
 ### Other

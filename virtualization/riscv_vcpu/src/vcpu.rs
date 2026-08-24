@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ax_errno::{AxError, AxErrorKind, AxResult};
-use axvm_types::{
-    AccessWidth, GuestPhysAddr, GuestVirtAddr, MappingFlags, NestedPagingConfig, VmExit,
-};
+use core::marker::PhantomData;
+
 use riscv::register::{scause, sie, sstatus};
 use riscv_decode::{
     Instruction,
@@ -34,12 +32,24 @@ use riscv_h::register::{
     vstval,
     vstvec::{self, Vstvec},
 };
-use rustsbi::{Forward, RustSBI};
-use sbi_spec::{hsm, legacy, pmu, rfnc, srst};
+use rustsbi::{Forward, RustSBI, SbiRet};
+use sbi_spec::{hsm, legacy, pmu, rfnc, spi, srst};
 
 use crate::{
-    EID_HVC, RISCVVCpuCreateConfig, consts::traps::irq::S_EXT, guest_mem, regs::*, sbi_console::*,
-    trap::Exception, vpmu::VirtualPmu,
+    EID_HVC, RiscvVcpuCreateConfig,
+    consts::traps::irq::{S_EXT, S_SOFT, S_TIMER, is_supervisor_external},
+    guest_mem,
+    host::RiscvHostOps,
+    registers::hgatp_value,
+    regs::*,
+    sbi_console::*,
+    trap::Exception,
+    types::{
+        RiscvAccessFlags, RiscvAccessWidth, RiscvGuestPhysAddr, RiscvGuestVirtAddr, RiscvIpiAbi,
+        RiscvIpiCompletion, RiscvIpiRequest, RiscvNestedPagingConfig, RiscvVcpuError,
+        RiscvVcpuResult, RiscvVmExit,
+    },
+    vpmu::VirtualPmu,
 };
 
 unsafe extern "C" {
@@ -55,22 +65,55 @@ const SYSTEM_OPCODE: u32 = 0x73;
 #[cfg(feature = "sstc")]
 const CSR_STIMECMP: u16 = 0x14d;
 
+fn initial_guest_sstatus() -> sstatus::Sstatus {
+    let mut status = sstatus::Sstatus::from_bits(0);
+    status.set_sie(false);
+    status.set_spie(false);
+    status.set_spp(sstatus::SPP::Supervisor);
+    // The vCPU target exposes F/D, so HS must permit guest floating-point
+    // instructions. The guest still owns its architectural FS via `vsstatus`.
+    status.set_fs(sstatus::FS::Initial);
+    status
+}
+
+fn initial_guest_hstatus() -> hstatus::Hstatus {
+    let mut status = hstatus::Hstatus::from_bits(0);
+    status.set_spv(true);
+    status.set_vsxl(hstatus::VsxlValues::Vsxl64);
+    // HS accesses performed on behalf of the guest use VS supervisor
+    // privilege until a guest trap updates SPVP.
+    status.set_spvp(true);
+    status.set_vtvm(false);
+    status.set_vtw(false);
+    status.set_vtsr(false);
+    status
+}
+
 #[inline]
 fn instr_is_pseudo(ins: u32) -> bool {
     ins == TINST_PSEUDO_STORE || ins == TINST_PSEUDO_LOAD
 }
 
-#[derive(Default)]
 /// A virtual CPU within a guest
-pub struct RISCVVCpu {
+pub struct RiscvVcpu<H: RiscvHostOps> {
     regs: VmCpuRegisters,
     sbi: RISCVVCpuSbi,
+    bound: bool,
+    _host: PhantomData<fn() -> H>,
 }
+
+/// Backward-compatible mixed-case vCPU alias.
+pub type RiscvVCpu<H> = RiscvVcpu<H>;
+
+/// Backward-compatible upper-case vCPU alias.
+pub type RISCVVCpu<H> = RiscvVcpu<H>;
 
 #[derive(RustSBI)]
 struct RISCVVCpuSbi {
     #[rustsbi(pmu)]
     pmu: VirtualPmu,
+    #[rustsbi(ipi)]
+    ipi: crate::sbi_ipi::VirtualSbiIpi,
     #[rustsbi(console, fence, reset, info, hsm, timer)]
     forward: Forward,
 }
@@ -79,13 +122,13 @@ struct RISCVVCpuSbi {
 /// Result of reading an instruction for virtual-instruction emulation.
 enum VirtualInstructionRead {
     Instruction(u32),
-    Handled(VmExit),
+    Handled(RiscvVmExit),
 }
 
 /// Result of decoding the trapped guest load/store instruction.
 enum InstructionDecode {
     Decoded(Instruction, usize),
-    Handled(VmExit),
+    Handled(RiscvVmExit),
 }
 
 impl Default for RISCVVCpuSbi {
@@ -93,18 +136,30 @@ impl Default for RISCVVCpuSbi {
     fn default() -> Self {
         Self {
             pmu: VirtualPmu::default(),
+            ipi: crate::sbi_ipi::VirtualSbiIpi,
             forward: Forward,
         }
     }
 }
 
-impl axvm_types::VmArchVcpuOps for RISCVVCpu {
-    type CreateConfig = RISCVVCpuCreateConfig;
+impl<H: RiscvHostOps> Default for RiscvVcpu<H> {
+    fn default() -> Self {
+        Self {
+            regs: VmCpuRegisters::default(),
+            sbi: RISCVVCpuSbi::default(),
+            bound: false,
+            _host: PhantomData,
+        }
+    }
+}
 
-    type SetupConfig = ();
-    type Exit = VmExit;
-
-    fn new(_vm_id: usize, _vcpu_id: usize, config: Self::CreateConfig) -> AxResult<Self> {
+impl<H: RiscvHostOps> RiscvVcpu<H> {
+    /// Creates a new RISC-V vCPU.
+    pub fn new(
+        _vm_id: usize,
+        _vcpu_id: usize,
+        config: RiscvVcpuCreateConfig,
+    ) -> RiscvVcpuResult<Self> {
         let mut regs = VmCpuRegisters::default();
         // Setup the guest's general purpose registers.
         // `a0` is the hartid
@@ -115,32 +170,17 @@ impl axvm_types::VmArchVcpuOps for RISCVVCpu {
         Ok(Self {
             regs,
             sbi: RISCVVCpuSbi::default(),
+            bound: false,
+            _host: PhantomData,
         })
     }
 
-    fn setup(&mut self, _config: Self::SetupConfig) -> AxResult {
-        // Set sstatus.
-        let mut sstatus = sstatus::read();
-        sstatus.set_sie(false);
-        sstatus.set_spie(false);
-        sstatus.set_spp(sstatus::SPP::Supervisor);
-        self.regs.guest_regs.sstatus = sstatus.bits();
-
-        // Set hstatus.
-        let mut hstatus = hstatus::read();
-        hstatus.set_spv(true);
-        hstatus.set_vsxl(hstatus::VsxlValues::Vsxl64);
-        // Set SPVP bit in order to accessing VS-mode memory from HS-mode.
-        hstatus.set_spvp(true);
-        // Let the guest execute its normal supervisor instructions without
-        // spuriously trapping them back to the hypervisor.
-        hstatus.set_vtvm(false);
-        hstatus.set_vtw(false);
-        hstatus.set_vtsr(false);
-        unsafe {
-            hstatus.write();
-        }
-        self.regs.guest_regs.hstatus = hstatus.bits();
+    /// Completes architecture-specific setup.
+    pub fn setup(&mut self, _config: ()) -> RiscvVcpuResult {
+        // Setup only constructs guest-owned reset state. `_run_guest` owns the
+        // live host/guest CSR swap at the assembly entry/exit boundary.
+        self.regs.guest_regs.sstatus = initial_guest_sstatus().bits();
+        self.regs.guest_regs.hstatus = initial_guest_hstatus().bits();
 
         let mut hie = hie::Hie::from_bits(0);
         hie.set_vssie(true);
@@ -160,28 +200,31 @@ impl axvm_types::VmArchVcpuOps for RISCVVCpu {
         Ok(())
     }
 
-    fn set_entry(&mut self, entry: GuestPhysAddr) -> AxResult {
+    /// Sets the guest entry point.
+    pub fn set_entry(&mut self, entry: RiscvGuestPhysAddr) -> RiscvVcpuResult {
         self.regs.guest_regs.sepc = entry.as_usize();
         Ok(())
     }
 
-    fn set_nested_page_table(&mut self, config: NestedPagingConfig) -> AxResult {
+    /// Sets the nested page table used by guest-stage translation.
+    pub fn set_nested_page_table(&mut self, config: RiscvNestedPagingConfig) -> RiscvVcpuResult {
         let expected_mode = match config.levels {
             3 => 8,
             4 => 9,
             _ => {
-                return Err(AxError::InvalidInput);
+                return Err(RiscvVcpuError::InvalidInput);
             }
         };
         if config.mode != expected_mode || config.root_paddr.as_usize() & 0x3fff != 0 {
-            return Err(AxError::InvalidInput);
+            return Err(RiscvVcpuError::InvalidInput);
         }
 
-        self.regs.virtual_hs_csrs.hgatp = config.mode << 60 | usize::from(config.root_paddr) >> 12;
+        self.regs.virtual_hs_csrs.hgatp = hgatp_value(config.mode, config.root_paddr.as_usize());
         Ok(())
     }
 
-    fn run(&mut self) -> AxResult<Self::Exit> {
+    /// Runs the vCPU until a host-visible exit occurs.
+    pub fn run(&mut self) -> RiscvVcpuResult<RiscvVmExit> {
         unsafe {
             sstatus::clear_sie();
             sie::set_sext();
@@ -204,7 +247,8 @@ impl axvm_types::VmArchVcpuOps for RISCVVCpu {
         self.vmexit_handler()
     }
 
-    fn bind(&mut self) -> AxResult {
+    /// Binds the vCPU to the current physical CPU.
+    pub fn bind(&mut self) -> RiscvVcpuResult {
         // Load the vCPU's CSRs from the stored state.
         unsafe {
             let vsatp = Vsatp::from_bits(self.regs.vs_csrs.vsatp);
@@ -241,10 +285,12 @@ impl axvm_types::VmArchVcpuOps for RISCVVCpu {
             core::arch::riscv64::hfence_gvma_all();
         }
         self.sbi.pmu.backend_bind();
+        self.bound = true;
         Ok(())
     }
 
-    fn unbind(&mut self) -> AxResult {
+    /// Unbinds the vCPU from the current physical CPU.
+    pub fn unbind(&mut self) -> RiscvVcpuResult {
         self.sbi.pmu.backend_unbind();
         // Store the vCPU's CSRs to the stored state.
         unsafe {
@@ -278,11 +324,12 @@ impl axvm_types::VmArchVcpuOps for RISCVVCpu {
             core::arch::asm!("csrw hgatp, x0");
             core::arch::riscv64::hfence_gvma_all();
         }
+        self.bound = false;
         Ok(())
     }
 
-    /// Set one of the vCPU's general purpose register.
-    fn set_gpr(&mut self, index: usize, val: usize) {
+    /// Set one of the vCPU's general purpose registers.
+    pub fn set_gpr(&mut self, index: usize, val: usize) {
         match index {
             0 => {
                 // Do nothing, x0 is hardwired to zero
@@ -300,41 +347,117 @@ impl axvm_types::VmArchVcpuOps for RISCVVCpu {
         }
     }
 
-    fn inject_interrupt(&mut self, _vector: usize) -> AxResult {
-        unimplemented!("RISCVVCpu::inject_interrupt is not implemented yet");
+    /// Injects a virtual interrupt into the guest.
+    pub fn inject_interrupt(&mut self, vector: usize) -> RiscvVcpuResult {
+        self.set_virtual_interrupt_pending(vector, true)
     }
 
-    fn set_return_value(&mut self, val: usize) {
+    /// Sets the controller-derived VSEIP line level for this vCPU.
+    ///
+    /// The virtual PLIC remains the owner of pending and delivery state. This
+    /// method always updates the vCPU-owned saved CSR image and reflects the
+    /// line into hardware only while the vCPU is loaded on the current CPU.
+    pub fn set_vseip_level(&mut self, asserted: bool) {
+        let mut saved = hvip::Hvip::from_bits(self.regs.virtual_hs_csrs.hvip);
+        saved.set_vseip(asserted);
+        self.regs.virtual_hs_csrs.hvip = saved.bits();
+        if self.bound {
+            unsafe {
+                if asserted {
+                    hvip::set_vseip();
+                } else {
+                    hvip::clear_vseip();
+                }
+            }
+        }
+    }
+
+    /// Sets the guest return value register.
+    pub fn set_return_value(&mut self, val: usize) {
         self.set_gpr_from_gpr_index(GprIndex::A0, val);
+    }
+
+    /// Completes a previously returned SBI IPI request.
+    pub fn complete_ipi(&mut self, request: RiscvIpiRequest, completion: RiscvIpiCompletion) {
+        let result = match completion {
+            RiscvIpiCompletion::Success => SbiRet::success(0),
+            RiscvIpiCompletion::InvalidParameter => SbiRet::invalid_param(),
+            RiscvIpiCompletion::Failed => SbiRet::failed(),
+        };
+        match request.abi() {
+            RiscvIpiAbi::Legacy => {
+                self.set_gpr_from_gpr_index(GprIndex::A0, result.error);
+            }
+            RiscvIpiAbi::SbiV02 => self.set_sbi_result(result),
+        }
+    }
+
+    fn set_virtual_interrupt_pending(&mut self, vector: usize, pending: bool) -> RiscvVcpuResult {
+        let mut saved = hvip::Hvip::from_bits(self.regs.virtual_hs_csrs.hvip);
+        match vector {
+            S_SOFT => saved.set_vssip(pending),
+            S_TIMER => saved.set_vstip(pending),
+            vector if is_supervisor_external(vector) => saved.set_vseip(pending),
+            _ => return Err(RiscvVcpuError::Unsupported),
+        }
+        self.regs.virtual_hs_csrs.hvip = saved.bits();
+
+        if self.bound {
+            unsafe {
+                match (vector, pending) {
+                    (S_SOFT, true) => hvip::set_vssip(),
+                    (S_SOFT, false) => hvip::clear_vssip(),
+                    (S_TIMER, true) => hvip::set_vstip(),
+                    (S_TIMER, false) => hvip::clear_vstip(),
+                    (_, true) => hvip::set_vseip(),
+                    (_, false) => hvip::clear_vseip(),
+                }
+            }
+        }
+        Ok(())
     }
 }
 
-impl RISCVVCpu {
+impl<H: RiscvHostOps> RiscvVcpu<H> {
     /// Capture any virtual pending interrupt bits that were raised after the
     /// last `unbind()` so the next `bind()` does not overwrite them with stale
     /// saved state.
     pub fn latch_hvip_from_hw(&mut self) {
         self.regs.virtual_hs_csrs.hvip |= hvip::read().bits();
     }
+
+    /// Attempts to decode the current guest-page-fault trap as an MMIO access.
+    pub fn decode_mmio_fault(
+        &mut self,
+        _fault_addr: RiscvGuestPhysAddr,
+        access_flags: RiscvAccessFlags,
+    ) -> Option<RiscvVmExit> {
+        let writing = access_flags.contains(RiscvAccessFlags::WRITE);
+        match self.handle_guest_page_fault(writing).ok()? {
+            exit @ (RiscvVmExit::MmioRead { .. } | RiscvVmExit::MmioWrite { .. }) => Some(exit),
+            _ => None,
+        }
+    }
 }
 
-impl RISCVVCpu {
+impl<H: RiscvHostOps> RiscvVcpu<H> {
     #[inline]
-    fn program_guest_timer(&mut self, deadline: usize) {
+    fn program_guest_timer(&mut self, deadline: usize) -> RiscvVcpuResult {
         #[cfg(feature = "sstc")]
         {
             self.regs.vs_csrs.vstimecmp = deadline;
         }
         sbi_rt::set_timer(deadline as u64);
+        self.set_virtual_interrupt_pending(S_TIMER, false)?;
         unsafe {
             // The guest has consumed the current VS timer event and programmed
             // a new deadline, so clear the injected VS timer pending bit and
             // re-arm HS timer delivery for the next expiration.
-            hvip::clear_vstip();
             #[cfg(feature = "sstc")]
             vstimecmp::write(deadline);
             sie::set_stimer();
         }
+        Ok(())
     }
 
     /// Gets one of the vCPU's general purpose registers.
@@ -358,10 +481,10 @@ impl RISCVVCpu {
     }
 }
 
-impl RISCVVCpu {
+impl<H: RiscvHostOps> RiscvVcpu<H> {
     /// Inject a synchronous VS exception so the guest handles a fault that happened during
     /// hypervisor-side instruction emulation.
-    fn inject_guest_exception(&mut self, exception: Exception, fault_addr: GuestVirtAddr) {
+    fn inject_guest_exception(&mut self, exception: Exception, fault_addr: RiscvGuestVirtAddr) {
         let mut vsstatus = vsstatus::read();
         let hstatus = hstatus::Hstatus::from_bits(self.regs.guest_regs.hstatus);
         let vstvec = vstvec::read().bits();
@@ -391,45 +514,45 @@ impl RISCVVCpu {
     fn handle_guest_instruction_fetch_fault(
         &mut self,
         fault: guest_mem::GuestInstructionFetchFault,
-    ) -> AxResult<VmExit> {
+    ) -> RiscvVcpuResult<RiscvVmExit> {
         match fault {
             // HLVX reports load-class faults, but the emulated operation is a
             // guest instruction fetch. Convert them before injecting to VS mode.
             guest_mem::GuestInstructionFetchFault::PageFault { addr } => {
                 self.inject_guest_exception(Exception::InstructionPageFault, addr);
-                Ok(VmExit::Nothing)
+                Ok(RiscvVmExit::Nothing)
             }
             guest_mem::GuestInstructionFetchFault::AccessFault { addr } => {
                 self.inject_guest_exception(Exception::InstructionFault, addr);
-                Ok(VmExit::Nothing)
+                Ok(RiscvVmExit::Nothing)
             }
             guest_mem::GuestInstructionFetchFault::Misaligned { addr } => {
                 self.inject_guest_exception(Exception::InstructionMisaligned, addr);
-                Ok(VmExit::Nothing)
+                Ok(RiscvVmExit::Nothing)
             }
             guest_mem::GuestInstructionFetchFault::GuestPageFault { addr } => {
                 // G-stage faults must stay visible to AxVM so it can populate or
                 // reject the nested mapping.
-                Ok(VmExit::NestedPageFault {
+                Ok(RiscvVmExit::NestedPageFault {
                     addr,
-                    access_flags: MappingFlags::EXECUTE,
+                    access_flags: RiscvAccessFlags::EXECUTE,
                 })
             }
             guest_mem::GuestInstructionFetchFault::Unhandled {
                 scause,
                 stval,
                 htval,
-            } => Err(ax_errno::ax_err_type!(
-                Unsupported,
-                alloc::format!(
+            } => {
+                warn!(
                     "unhandled riscv HLVX fault while fetching guest instruction: \
                      scause={scause:#x}, stval={stval:#x}, htval={htval:#x}"
-                )
-            )),
+                );
+                Err(RiscvVcpuError::GuestMemoryFault)
+            }
         }
     }
 
-    fn vmexit_handler(&mut self) -> AxResult<VmExit> {
+    fn vmexit_handler(&mut self) -> RiscvVcpuResult<RiscvVmExit> {
         self.regs.trap_csrs.load_from_hw();
 
         let scause = scause::read();
@@ -445,7 +568,7 @@ impl RISCVVCpu {
         // Try to convert the raw trap cause to a standard RISC-V trap cause.
         let trap: Trap<Interrupt, Exception> = scause.cause().try_into().map_err(|_| {
             error!("Unknown trap cause: scause={:#x}", scause.bits());
-            AxError::from(AxErrorKind::InvalidData)
+            RiscvVcpuError::InvalidTrap
         })?;
 
         match trap {
@@ -468,7 +591,7 @@ impl RISCVVCpu {
                         legacy::LEGACY_SET_TIMER => {
                             // info!("set timer: {}", param[0]);
                             self.sbi.pmu.record_set_timer();
-                            self.program_guest_timer(param[0]);
+                            self.program_guest_timer(param[0])?;
 
                             self.set_gpr_from_gpr_index(GprIndex::A0, 0);
                         }
@@ -479,9 +602,22 @@ impl RISCVVCpu {
                             let c = sbi_call_legacy_0(legacy::LEGACY_CONSOLE_GETCHAR);
                             self.set_gpr_from_gpr_index(GprIndex::A0, c);
                         }
+                        legacy::LEGACY_SEND_IPI => {
+                            return self.handle_legacy_send_ipi(param[0], |guest_va, bytes| {
+                                guest_mem::copy_from_guest_va(
+                                    bytes,
+                                    RiscvGuestVirtAddr::from(guest_va),
+                                    true,
+                                )
+                            });
+                        }
+                        legacy::LEGACY_CLEAR_IPI => {
+                            self.set_virtual_interrupt_pending(S_SOFT, false)?;
+                            self.set_gpr_from_gpr_index(GprIndex::A0, RET_SUCCESS);
+                        }
                         legacy::LEGACY_SHUTDOWN => {
                             // sbi_call_legacy_0(LEGACY_SHUTDOWN)
-                            return Ok(VmExit::SystemDown);
+                            return Ok(RiscvVmExit::SystemDown);
                         }
                         _ => {
                             warn!(
@@ -490,16 +626,28 @@ impl RISCVVCpu {
                             );
                         }
                     },
-                    EID_TIME => match function_id {
-                        FID_SET_TIMER => {
-                            self.sbi.pmu.record_set_timer();
-                            self.program_guest_timer(param[0]);
-                            self.sbi_return(RET_SUCCESS, 0);
-                            return Ok(VmExit::Nothing);
+                    spi::EID_SPI => match function_id {
+                        spi::SEND_IPI => {
+                            let request =
+                                crate::sbi_ipi::decode_standard_request(param[0], param[1]);
+                            self.advance_pc(4);
+                            return Ok(RiscvVmExit::SendIpi(request));
                         }
                         _ => {
                             self.sbi_return(RET_ERR_NOT_SUPPORTED, 0);
-                            return Ok(VmExit::Nothing);
+                            return Ok(RiscvVmExit::Nothing);
+                        }
+                    },
+                    EID_TIME => match function_id {
+                        FID_SET_TIMER => {
+                            self.sbi.pmu.record_set_timer();
+                            self.program_guest_timer(param[0])?;
+                            self.sbi_return(RET_SUCCESS, 0);
+                            return Ok(RiscvVmExit::Nothing);
+                        }
+                        _ => {
+                            self.sbi_return(RET_ERR_NOT_SUPPORTED, 0);
+                            return Ok(RiscvVmExit::Nothing);
                         }
                     },
                     // Handle HSM extension
@@ -509,28 +657,31 @@ impl RISCVVCpu {
                             let start_addr = a[1];
                             let opaque = a[2];
                             self.advance_pc(4);
-                            return Ok(VmExit::CpuUp {
+                            return Ok(RiscvVmExit::CpuUp {
                                 target_cpu: hartid as _,
-                                entry_point: GuestPhysAddr::from(start_addr),
+                                entry_point: RiscvGuestPhysAddr::from(start_addr),
                                 arg: opaque as _,
                             });
                         }
                         hsm::HART_STOP => {
-                            return Ok(VmExit::CpuDown { _state: 0 });
+                            return Ok(RiscvVmExit::CpuDown { state: 0 });
                         }
                         hsm::HART_SUSPEND => {
-                            // Todo: support these parameters.
+                            // These parameters are reserved for a future suspend-state model.
                             let _suspend_type = a[0];
                             let _resume_addr = a[1];
                             let _opaque = a[2];
-                            return Ok(VmExit::Halt);
+                            return Ok(RiscvVmExit::Halt);
                         }
-                        _ => todo!(),
+                        _ => {
+                            self.sbi_return(RET_ERR_NOT_SUPPORTED, 0);
+                            return Ok(RiscvVmExit::Nothing);
+                        }
                     },
                     // Handle hypercall
                     EID_HVC => {
                         self.advance_pc(4);
-                        return Ok(VmExit::Hypercall {
+                        return Ok(RiscvVmExit::Hypercall {
                             nr: function_id as _,
                             args: [
                                 param[0] as _,
@@ -551,23 +702,23 @@ impl RISCVVCpu {
 
                             if num_bytes == 0 {
                                 self.sbi_return(RET_SUCCESS, 0);
-                                return Ok(VmExit::Nothing);
+                                return Ok(RiscvVmExit::Nothing);
                             }
 
                             let mut buf = alloc::vec![0u8; num_bytes];
                             let copied = guest_mem::copy_from_guest(
                                 &mut buf,
-                                GuestPhysAddr::from(gpa as usize),
+                                RiscvGuestPhysAddr::from(gpa as usize),
                             );
 
                             if copied == buf.len() {
-                                let ret = console_write(&buf);
+                                let ret = console_write::<H>(&buf);
                                 self.sbi_return(ret.error, ret.value);
                             } else {
                                 self.sbi_return(RET_ERR_FAILED, 0);
                             }
 
-                            return Ok(VmExit::Nothing);
+                            return Ok(RiscvVmExit::Nothing);
                         }
                         // Read to memory region from debug console.
                         FID_CONSOLE_READ => {
@@ -576,16 +727,16 @@ impl RISCVVCpu {
 
                             if num_bytes == 0 {
                                 self.sbi_return(RET_SUCCESS, 0);
-                                return Ok(VmExit::Nothing);
+                                return Ok(RiscvVmExit::Nothing);
                             }
 
                             let mut buf = alloc::vec![0u8; num_bytes];
-                            let ret = console_read(&mut buf);
+                            let ret = console_read::<H>(&mut buf);
 
                             if ret.is_ok() && ret.value <= buf.len() {
                                 let copied = guest_mem::copy_to_guest(
                                     &buf[..ret.value],
-                                    GuestPhysAddr::from(gpa as usize),
+                                    RiscvGuestPhysAddr::from(gpa as usize),
                                 );
                                 if copied == ret.value {
                                     self.sbi_return(RET_SUCCESS, ret.value);
@@ -596,19 +747,19 @@ impl RISCVVCpu {
                                 self.sbi_return(ret.error, ret.value);
                             }
 
-                            return Ok(VmExit::Nothing);
+                            return Ok(RiscvVmExit::Nothing);
                         }
                         // Write a single byte to debug console.
                         FID_CONSOLE_WRITE_BYTE => {
                             let byte = (param[0] & 0xff) as u8;
                             print_byte(byte);
                             self.sbi_return(RET_SUCCESS, 0);
-                            return Ok(VmExit::Nothing);
+                            return Ok(RiscvVmExit::Nothing);
                         }
                         // Unknown FID.
                         _ => {
                             self.sbi_return(RET_ERR_NOT_SUPPORTED, 0);
-                            return Ok(VmExit::Nothing);
+                            return Ok(RiscvVmExit::Nothing);
                         }
                     },
                     srst::EID_SRST => match function_id {
@@ -616,14 +767,15 @@ impl RISCVVCpu {
                             let reset_type = param[0];
                             if reset_type == srst::RESET_TYPE_SHUTDOWN as _ {
                                 // Shutdown the system.
-                                return Ok(VmExit::SystemDown);
+                                return Ok(RiscvVmExit::SystemDown);
                             } else {
-                                unimplemented!("Unsupported reset type {}", reset_type);
+                                self.sbi_return(RET_ERR_NOT_SUPPORTED, 0);
+                                return Ok(RiscvVmExit::Nothing);
                             }
                         }
                         _ => {
                             self.sbi_return(RET_ERR_NOT_SUPPORTED, 0);
-                            return Ok(VmExit::Nothing);
+                            return Ok(RiscvVmExit::Nothing);
                         }
                     },
                     pmu::EID_PMU => {
@@ -669,18 +821,24 @@ impl RISCVVCpu {
                 };
 
                 self.advance_pc(4);
-                Ok(VmExit::Nothing)
+                Ok(RiscvVmExit::Nothing)
             }
             Trap::Exception(Exception::VirtualInstruction) => self.handle_virtual_instruction(),
             Trap::Interrupt(Interrupt::SupervisorTimer) => {
                 // Forward the elapsed timer to VS and stop taking the same HS
                 // timer interrupt repeatedly until software programs a new one.
-                unsafe {
-                    hvip::set_vstip();
-                    sie::clear_stimer();
-                }
+                self.inject_interrupt(S_TIMER)?;
+                unsafe { sie::clear_stimer() };
 
-                Ok(VmExit::Nothing)
+                Ok(RiscvVmExit::Nothing)
+            }
+            Trap::Interrupt(Interrupt::SupervisorSoft) => {
+                // Host IPIs and scheduler wakeups use SSIP. Route them through
+                // the host IRQ path so it can acknowledge SSIP before the vCPU
+                // resumes instead of treating the interrupt as a guest trap.
+                Ok(RiscvVmExit::ExternalInterrupt {
+                    vector: S_SOFT as _,
+                })
             }
             Trap::Interrupt(Interrupt::SupervisorExternal) => {
                 // 9 == Interrupt::SupervisorExternal
@@ -688,13 +846,13 @@ impl RISCVVCpu {
                 // It's a great fault in the `riscv` crate that `Interrupt` and `Exception` are not
                 // explicitly numbered, and they provide no way to convert them to a number. Also,
                 // `as usize` will give use a wrong value.
-                Ok(VmExit::ExternalInterrupt { vector: S_EXT as _ })
+                Ok(RiscvVmExit::ExternalInterrupt { vector: S_EXT as _ })
             }
             Trap::Exception(
                 gpf @ (Exception::LoadGuestPageFault | Exception::StoreGuestPageFault),
             ) => self.handle_guest_page_fault(gpf == Exception::StoreGuestPageFault),
             _ => {
-                panic!(
+                error!(
                     "Unhandled trap: {:?}, sepc: {:#x}, stval: {:#x}, htval: {:#x}, htinst: \
                      {:#x}, vsepc: {:#x}, vstval: {:#x}, vsatp: {:#x}, hgatp: {:#x}, a0-a3: \
                      [{:#x}, {:#x}, {:#x}, {:#x}]",
@@ -712,19 +870,47 @@ impl RISCVVCpu {
                     self.regs.guest_regs.gprs.reg(GprIndex::A2),
                     self.regs.guest_regs.gprs.reg(GprIndex::A3)
                 );
+                Err(RiscvVcpuError::Unsupported)
             }
         }
     }
 
     #[inline]
     fn sbi_return(&mut self, a0: usize, a1: usize) {
-        self.set_gpr_from_gpr_index(GprIndex::A0, a0);
-        self.set_gpr_from_gpr_index(GprIndex::A1, a1);
+        self.set_sbi_result(SbiRet {
+            error: a0,
+            value: a1,
+        });
         self.advance_pc(4);
     }
 
+    #[inline]
+    fn set_sbi_result(&mut self, result: SbiRet) {
+        self.set_gpr_from_gpr_index(GprIndex::A0, result.error);
+        self.set_gpr_from_gpr_index(GprIndex::A1, result.value);
+    }
+
+    fn handle_legacy_send_ipi(
+        &mut self,
+        hart_mask_ptr: usize,
+        copy_from_guest_va: impl FnMut(usize, &mut [u8]) -> usize,
+    ) -> RiscvVcpuResult<RiscvVmExit> {
+        let request = match crate::sbi_ipi::decode_legacy_request(hart_mask_ptr, copy_from_guest_va)
+        {
+            Ok(request) => request,
+            Err(error) => {
+                warn!("failed to read legacy SBI IPI hart mask at {hart_mask_ptr:#x}: {error:?}");
+                self.sbi_return(RET_ERR_FAILED, 0);
+                return Ok(RiscvVmExit::Nothing);
+            }
+        };
+
+        self.advance_pc(4);
+        Ok(RiscvVmExit::SendIpi(request))
+    }
+
     #[cfg(feature = "sstc")]
-    fn handle_virtual_instruction(&mut self) -> AxResult<VmExit> {
+    fn handle_virtual_instruction(&mut self) -> RiscvVcpuResult<RiscvVmExit> {
         let instr = match self.read_virtual_instruction()? {
             VirtualInstructionRead::Instruction(instr) => instr,
             VirtualInstructionRead::Handled(exit_reason) => return Ok(exit_reason),
@@ -733,17 +919,15 @@ impl RISCVVCpu {
 
         if csr != CSR_STIMECMP {
             self.sbi.pmu.record_illegal_insn();
-            return Err(ax_errno::ax_err_type!(
-                Unsupported,
-                alloc::format!(
-                    "Unhandled virtual instruction csr={csr:#x}, sepc: {:#x}, stval: {:#x}, \
-                     htval: {:#x}, htinst: {:#x}",
-                    self.regs.guest_regs.sepc,
-                    self.regs.trap_csrs.stval,
-                    self.regs.trap_csrs.htval,
-                    self.regs.trap_csrs.htinst,
-                )
-            ));
+            warn!(
+                "Unhandled virtual instruction csr={csr:#x}, sepc: {:#x}, stval: {:#x}, htval: \
+                 {:#x}, htinst: {:#x}",
+                self.regs.guest_regs.sepc,
+                self.regs.trap_csrs.stval,
+                self.regs.trap_csrs.htval,
+                self.regs.trap_csrs.htinst,
+            );
+            return Err(RiscvVcpuError::Unsupported);
         }
 
         let funct3 = ((instr >> 12) & 0x7) as u8;
@@ -786,14 +970,12 @@ impl RISCVVCpu {
             }
             _ => {
                 self.sbi.pmu.record_illegal_insn();
-                return Err(ax_errno::ax_err_type!(
-                    Unsupported,
-                    alloc::format!(
-                        "Unhandled virtual instruction funct3={funct3:#x} for csr={csr:#x}, sepc: \
-                         {:#x}",
-                        self.regs.guest_regs.sepc,
-                    )
-                ));
+                warn!(
+                    "Unhandled virtual instruction funct3={funct3:#x} for csr={csr:#x}, sepc: \
+                     {:#x}",
+                    self.regs.guest_regs.sepc,
+                );
+                return Err(RiscvVcpuError::Unsupported);
             }
         };
 
@@ -806,38 +988,37 @@ impl RISCVVCpu {
             // We currently emulate that CSR access rather than exposing direct
             // hardware STCE, so this path must also program the underlying HS
             // timer instead of only updating saved VS state.
-            self.program_guest_timer(new_value);
+            self.program_guest_timer(new_value)?;
         }
 
         self.advance_pc(4);
-        Ok(VmExit::Nothing)
+        Ok(RiscvVmExit::Nothing)
     }
 
     #[cfg(not(feature = "sstc"))]
-    fn handle_virtual_instruction(&mut self) -> AxResult<VmExit> {
+    fn handle_virtual_instruction(&mut self) -> RiscvVcpuResult<RiscvVmExit> {
         self.sbi.pmu.record_illegal_insn();
-        Err(ax_errno::ax_err_type!(
-            Unsupported,
-            alloc::format!(
-                "Unhandled virtual instruction without `sstc` feature, sepc: {:#x}, stval: {:#x}, \
-                 htval: {:#x}, htinst: {:#x}",
-                self.regs.guest_regs.sepc,
-                self.regs.trap_csrs.stval,
-                self.regs.trap_csrs.htval,
-                self.regs.trap_csrs.htinst,
-            )
-        ))
+        warn!(
+            "Unhandled virtual instruction without `sstc` feature, sepc: {:#x}, stval: {:#x}, \
+             htval: {:#x}, htinst: {:#x}",
+            self.regs.guest_regs.sepc,
+            self.regs.trap_csrs.stval,
+            self.regs.trap_csrs.htval,
+            self.regs.trap_csrs.htinst,
+        );
+        Err(RiscvVcpuError::Unsupported)
     }
 
     #[cfg(feature = "sstc")]
-    fn read_virtual_instruction(&mut self) -> AxResult<VirtualInstructionRead> {
+    fn read_virtual_instruction(&mut self) -> RiscvVcpuResult<VirtualInstructionRead> {
         let instr = self.regs.trap_csrs.stval as u32;
         if instr & 0x7f == SYSTEM_OPCODE {
             return Ok(VirtualInstructionRead::Instruction(instr));
         }
 
-        let guest_pc = GuestVirtAddr::from(self.regs.guest_regs.sepc);
-        match guest_mem::fetch_guest_instruction(guest_pc) {
+        let guest_pc = RiscvGuestVirtAddr::from(self.regs.guest_regs.sepc);
+        let supervisor = hstatus::Hstatus::from_bits(self.regs.guest_regs.hstatus).spvp();
+        match guest_mem::fetch_guest_instruction(guest_pc, supervisor) {
             Ok(instr) => Ok(VirtualInstructionRead::Instruction(instr)),
             Err(fault) => self
                 .handle_guest_instruction_fetch_fault(fault)
@@ -861,14 +1042,15 @@ impl RISCVVCpu {
 
     /// Decode the instruction at the given virtual address. Return the decoded instruction and its
     /// length in bytes, or an exit reason already produced while fetching it.
-    fn decode_instr_at(&mut self, vaddr: GuestVirtAddr) -> AxResult<InstructionDecode> {
-        // The htinst CSR contains "transformed instruction" that caused the page fault. We
-        // can use it but we use the sepc to fetch the original instruction instead for now.
-        let mut instr = riscv_h::register::htinst::read();
+    fn decode_instr_at(&mut self, vaddr: RiscvGuestVirtAddr) -> RiscvVcpuResult<InstructionDecode> {
+        // Use the value captured together with the guest trap. Reading the
+        // live CSR here races with host interrupts, which may overwrite it.
+        let mut instr = self.regs.trap_csrs.htinst;
         let instr_len;
         if instr == 0 {
             // Read the instruction from guest memory.
-            instr = match guest_mem::fetch_guest_instruction(vaddr) {
+            let supervisor = hstatus::Hstatus::from_bits(self.regs.guest_regs.hstatus).spvp();
+            instr = match guest_mem::fetch_guest_instruction(vaddr, supervisor) {
                 Ok(instr) => instr as _,
                 Err(fault) => {
                     return self
@@ -880,14 +1062,11 @@ impl RISCVVCpu {
             instr = match instr_len {
                 2 => instr & 0xffff,
                 4 => instr,
-                _ => unreachable!("Unsupported instruction length: {}", instr_len),
+                _ => return Err(RiscvVcpuError::DecodeFailed),
             };
         } else if instr_is_pseudo(instr as u32) {
             error!("fault on 1st stage page table walk");
-            return Err(ax_errno::ax_err_type!(
-                Unsupported,
-                "risc-v vcpu guest page fault handler encountered pseudo instruction"
-            ));
+            return Err(RiscvVcpuError::Unsupported);
         } else {
             // Transform htinst value to standard instruction.
             // According to RISC-V Spec:
@@ -896,37 +1075,32 @@ impl RISCVVCpu {
             instr_len = match (instr as u16) & 0x3 {
                 0x1 => 2,
                 0x3 => 4,
-                _ => unreachable!("Unsupported instruction length"),
+                _ => return Err(RiscvVcpuError::DecodeFailed),
             };
             instr |= 0x2;
         }
 
         riscv_decode::decode(instr as u32)
-            .map_err(|_| {
-                ax_errno::ax_err_type!(
-                    Unsupported,
-                    "risc-v vcpu guest pf handler decoding instruction failed"
-                )
-            })
+            .map_err(|_| RiscvVcpuError::DecodeFailed)
             .map(|instr| InstructionDecode::Decoded(instr, instr_len))
     }
 
     /// Handle a guest page fault. Return an exit reason.
-    fn handle_guest_page_fault(&mut self, _writing: bool) -> AxResult<VmExit> {
+    fn handle_guest_page_fault(&mut self, _writing: bool) -> RiscvVcpuResult<RiscvVmExit> {
         let fault_addr = self.regs.trap_csrs.gpt_page_fault_addr();
         let sepc = self.regs.guest_regs.sepc;
-        let sepc_vaddr = GuestVirtAddr::from(sepc);
+        let sepc_vaddr = RiscvGuestVirtAddr::from(sepc);
 
         /// Temporary enum to represent the decoded operation.
         enum DecodedOp {
             Read {
                 i: IType,
-                width: AccessWidth,
+                width: RiscvAccessWidth,
                 signed_ext: bool,
             },
             Write {
                 s: SType,
-                width: AccessWidth,
+                width: RiscvAccessWidth,
             },
         }
 
@@ -939,60 +1113,60 @@ impl RISCVVCpu {
         let op = match decoded_instr {
             Instruction::Lb(i) => Read {
                 i,
-                width: AccessWidth::Byte,
+                width: RiscvAccessWidth::Byte,
                 signed_ext: true,
             },
             Instruction::Lh(i) => Read {
                 i,
-                width: AccessWidth::Word,
+                width: RiscvAccessWidth::Word,
                 signed_ext: true,
             },
             Instruction::Lw(i) => Read {
                 i,
-                width: AccessWidth::Dword,
+                width: RiscvAccessWidth::Dword,
                 signed_ext: true,
             },
             Instruction::Ld(i) => Read {
                 i,
-                width: AccessWidth::Qword,
+                width: RiscvAccessWidth::Qword,
                 signed_ext: true,
             },
             Instruction::Lbu(i) => Read {
                 i,
-                width: AccessWidth::Byte,
+                width: RiscvAccessWidth::Byte,
                 signed_ext: false,
             },
             Instruction::Lhu(i) => Read {
                 i,
-                width: AccessWidth::Word,
+                width: RiscvAccessWidth::Word,
                 signed_ext: false,
             },
             Instruction::Lwu(i) => Read {
                 i,
-                width: AccessWidth::Dword,
+                width: RiscvAccessWidth::Dword,
                 signed_ext: false,
             },
             Instruction::Sb(s) => Write {
                 s,
-                width: AccessWidth::Byte,
+                width: RiscvAccessWidth::Byte,
             },
             Instruction::Sh(s) => Write {
                 s,
-                width: AccessWidth::Word,
+                width: RiscvAccessWidth::Word,
             },
             Instruction::Sw(s) => Write {
                 s,
-                width: AccessWidth::Dword,
+                width: RiscvAccessWidth::Dword,
             },
             Instruction::Sd(s) => Write {
                 s,
-                width: AccessWidth::Qword,
+                width: RiscvAccessWidth::Qword,
             },
             _ => {
                 // Not a load or store instruction, so we cannot handle it here, return a nested page fault.
-                return Ok(VmExit::NestedPageFault {
+                return Ok(RiscvVmExit::NestedPageFault {
                     addr: fault_addr,
-                    access_flags: MappingFlags::empty(),
+                    access_flags: RiscvAccessFlags::empty(),
                 });
             }
         };
@@ -1007,23 +1181,21 @@ impl RISCVVCpu {
                 signed_ext,
             } => {
                 self.sbi.pmu.record_access_load();
-                VmExit::MmioRead {
+                RiscvVmExit::MmioRead {
                     addr: fault_addr,
                     width,
                     reg: i.rd() as _,
-                    reg_width: AccessWidth::Qword,
+                    reg_width: RiscvAccessWidth::Qword,
                     signed_ext,
                 }
             }
             Write { s, width } => {
                 self.sbi.pmu.record_access_store();
                 let source_reg = s.rs2();
-                let value = self.get_gpr(unsafe {
-                    // SAFETY: `source_reg` is guaranteed to be in [0, 31]
-                    GprIndex::from_raw(source_reg).unwrap_unchecked()
-                });
+                let value = self
+                    .get_gpr(GprIndex::from_raw(source_reg).ok_or(RiscvVcpuError::DecodeFailed)?);
 
-                VmExit::MmioWrite {
+                RiscvVmExit::MmioWrite {
                     addr: fault_addr,
                     width,
                     data: value as _,
@@ -1057,4 +1229,97 @@ fn sbi_call_legacy_1(eid: usize, arg0: usize) -> usize {
         );
     }
     error
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RiscvHostPhysAddr, RiscvHostVirtAddr};
+
+    struct TestHost;
+
+    impl RiscvHostOps for TestHost {
+        fn virt_to_phys(_vaddr: RiscvHostVirtAddr) -> RiscvHostPhysAddr {
+            RiscvHostPhysAddr::from_usize(0)
+        }
+    }
+
+    #[test]
+    fn setup_constructs_guest_status_without_accessing_host_csrs() {
+        let mut vcpu = RiscvVcpu::<TestHost>::default();
+
+        vcpu.setup(()).unwrap();
+
+        let sstatus = sstatus::Sstatus::from_bits(vcpu.regs.guest_regs.sstatus);
+        assert!(!sstatus.sie());
+        assert!(!sstatus.spie());
+        assert_eq!(sstatus.spp(), sstatus::SPP::Supervisor);
+        assert_eq!(sstatus.fs(), sstatus::FS::Initial);
+
+        let hstatus = hstatus::Hstatus::from_bits(vcpu.regs.guest_regs.hstatus);
+        let expected_hstatus = (2 << 32) | (1 << 8) | (1 << 7);
+        assert_eq!(hstatus.bits(), expected_hstatus);
+        assert!(hstatus.spv());
+        assert!(hstatus.spvp());
+        assert!(!hstatus.vtvm());
+        assert!(!hstatus.vtw());
+        assert!(!hstatus.vtsr());
+    }
+
+    #[test]
+    fn legacy_ipi_completion_updates_only_a0() {
+        let mut vcpu = RiscvVcpu::<TestHost>::default();
+        let request = RiscvIpiRequest::new(1, 0, RiscvIpiAbi::Legacy);
+
+        for (completion, expected) in [
+            (RiscvIpiCompletion::Success, SbiRet::success(0)),
+            (
+                RiscvIpiCompletion::InvalidParameter,
+                SbiRet::invalid_param(),
+            ),
+            (RiscvIpiCompletion::Failed, SbiRet::failed()),
+        ] {
+            let preserved_a1 = 0xfeed_face;
+            vcpu.set_gpr_from_gpr_index(GprIndex::A1, preserved_a1);
+
+            vcpu.complete_ipi(request, completion);
+
+            assert_eq!(vcpu.get_gpr(GprIndex::A0), expected.error);
+            assert_eq!(vcpu.get_gpr(GprIndex::A1), preserved_a1);
+        }
+    }
+
+    #[test]
+    fn sbi_v02_ipi_completion_updates_a0_and_a1() {
+        let mut vcpu = RiscvVcpu::<TestHost>::default();
+        let request = RiscvIpiRequest::new(1, 0, RiscvIpiAbi::SbiV02);
+
+        for (completion, expected) in [
+            (RiscvIpiCompletion::Success, SbiRet::success(0)),
+            (
+                RiscvIpiCompletion::InvalidParameter,
+                SbiRet::invalid_param(),
+            ),
+            (RiscvIpiCompletion::Failed, SbiRet::failed()),
+        ] {
+            vcpu.set_gpr_from_gpr_index(GprIndex::A0, usize::MAX);
+            vcpu.set_gpr_from_gpr_index(GprIndex::A1, usize::MAX);
+
+            vcpu.complete_ipi(request, completion);
+
+            assert_eq!(vcpu.get_gpr(GprIndex::A0), expected.error);
+            assert_eq!(vcpu.get_gpr(GprIndex::A1), expected.value);
+        }
+    }
+
+    #[test]
+    fn controller_vseip_line_updates_saved_state_while_unbound() {
+        let mut vcpu = RiscvVcpu::<TestHost>::default();
+
+        vcpu.set_vseip_level(true);
+        assert!(hvip::Hvip::from_bits(vcpu.regs.virtual_hs_csrs.hvip).vseip());
+
+        vcpu.set_vseip_level(false);
+        assert!(!hvip::Hvip::from_bits(vcpu.regs.virtual_hs_csrs.hvip).vseip());
+    }
 }

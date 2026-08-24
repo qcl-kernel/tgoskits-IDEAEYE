@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/rcore-os/tgoskits/compare/x86_vcpu-v0.5.21...x86_vcpu-v0.6.0) - 2026-08-20
+
+### Added
+
+- *(dma-api)* [**breaking**] add device DMA coherency with uncached-alias remap ([#2106](https://github.com/rcore-os/tgoskits/pull/2106))
+
+### Fixed
+
+- *(x86_vcpu)* decode generic device MMIO of arbitrary width on NPF/EPT ([#2082](https://github.com/rcore-os/tgoskits/pull/2082))
+
+## [0.5.21](https://github.com/rcore-os/tgoskits/compare/x86_vcpu-v0.5.20...x86_vcpu-v0.5.21) - 2026-08-09
+
+### Added
+
+- *(axvisor)* build VMs from a resolved device graph ([#1718](https://github.com/rcore-os/tgoskits/pull/1718))
+
+### Other
+
+- *(axvm)* unify guest devices and AArch64 timer ownership ([#1717](https://github.com/rcore-os/tgoskits/pull/1717))
+
+## [0.5.20](https://github.com/rcore-os/tgoskits/compare/x86_vcpu-v0.5.19...x86_vcpu-v0.5.20) - 2026-07-23
+
+### Added
+
+- *(axvisor)* Enhance AxLoader and Asus NUC15CRH support with fixes ([#1555](https://github.com/rcore-os/tgoskits/pull/1555))
+
+### Other
+
+- *(cpu-local)* extract per-CPU register ownership ([#1662](https://github.com/rcore-os/tgoskits/pull/1662))
+- *(x86_vcpu)* select VMX/SVM backend at runtime from CPUID, rem… ([#1629](https://github.com/rcore-os/tgoskits/pull/1629))
+
+## [0.5.19](https://github.com/rcore-os/tgoskits/compare/x86_vcpu-v0.5.18...x86_vcpu-v0.5.19) - 2026-07-10
+
+### Other
+
+- *(x86_vcpu)* make x86 virtualization OS-neutral ([#1550](https://github.com/rcore-os/tgoskits/pull/1550))
+
 ## [0.5.18](https://github.com/rcore-os/tgoskits/compare/x86_vcpu-v0.5.17...x86_vcpu-v0.5.18) - 2026-07-08
 
 ### Other

@@ -1,14 +1,15 @@
-use ax_errno::{AxResult, ax_err};
-use ax_kspin::SpinNoIrq as Mutex;
-use axdevice_base::{AccessWidth, BaseDeviceOps, EmuDeviceType, Port, PortRange};
+use alloc::sync::Arc;
+use core::{
+    marker::PhantomData,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
-use crate::host;
+use crate::{host::*, lock::SpinMutex as Mutex, *};
 
 const PIT_CHANNEL0: u16 = 0x40;
 const PIT_CHANNEL2: u16 = 0x42;
 const PIT_COMMAND: u16 = 0x43;
 const PIT_SPEAKER_CONTROL: u16 = 0x61;
-const PIT_PORT_END: u16 = PIT_SPEAKER_CONTROL;
 
 const PIT_BASE_FREQUENCY_HZ: u64 = 1_193_182;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -128,16 +129,24 @@ impl PitChannel {
         self.irq_fired = false;
     }
 
-    fn write_count(&mut self, value: u8, now_ns: u64) {
+    fn write_count(&mut self, value: u8, now_ns: u64) -> bool {
         match self.access_mode {
-            AccessMode::LatchCount => {}
-            AccessMode::LowByte => self.program_reload(value as u16, now_ns),
-            AccessMode::HighByte => self.program_reload((value as u16) << 8, now_ns),
+            AccessMode::LatchCount => false,
+            AccessMode::LowByte => {
+                self.program_reload(value as u16, now_ns);
+                true
+            }
+            AccessMode::HighByte => {
+                self.program_reload((value as u16) << 8, now_ns);
+                true
+            }
             AccessMode::LowThenHigh => {
                 if let Some(low) = self.write_low_latched.take() {
                     self.program_reload(((value as u16) << 8) | low as u16, now_ns);
+                    true
                 } else {
                     self.write_low_latched = Some(value);
+                    false
                 }
             }
         }
@@ -254,15 +263,32 @@ impl PitState {
 }
 
 /// A minimal emulated x86 PIT/8254 device.
-pub struct EmulatedPit {
+pub struct EmulatedPit<H: X86VlapicHostOps> {
     state: Mutex<PitState>,
+    irq0_timer: Mutex<PitIrqTimer<H>>,
+    _host: PhantomData<fn() -> H>,
 }
 
-impl EmulatedPit {
+struct PitIrqTimer<H: X86VlapicHostOps> {
+    generation: Arc<AtomicUsize>,
+    token: Option<usize>,
+    vm_id: X86VmId,
+    vcpu_id: X86VcpuId,
+    _host: PhantomData<fn() -> H>,
+}
+
+impl<H: X86VlapicHostOps> EmulatedPit<H> {
     /// Create a new PIT device.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        Self::new_for_vcpu(0, 0)
+    }
+
+    /// Create a PIT whose IRQ0 is routed to one VM vCPU by the host adapter.
+    pub fn new_for_vcpu(vm_id: X86VmId, vcpu_id: X86VcpuId) -> Self {
         Self {
             state: Mutex::new(PitState::new()),
+            irq0_timer: Mutex::new(PitIrqTimer::new(vm_id, vcpu_id)),
+            _host: PhantomData,
         }
     }
 
@@ -271,6 +297,9 @@ impl EmulatedPit {
     /// When a deadline is reached, this advances the deadline by whole periods so the timer
     /// remains periodic without queueing a burst of missed ticks.
     pub fn consume_irq0_if_due(&self, now_ns: u64) -> bool {
+        if self.irq0_timer.lock().is_scheduled() {
+            return false;
+        }
         let mut state = self.state.lock();
         let channel = &mut state.channel0;
         let Some(period_ns) = channel.period_ns else {
@@ -355,29 +384,110 @@ impl EmulatedPit {
     }
 }
 
-impl Default for EmulatedPit {
+impl<H: X86VlapicHostOps> Default for EmulatedPit<H> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl BaseDeviceOps<PortRange> for EmulatedPit {
-    fn emu_type(&self) -> EmuDeviceType {
-        EmuDeviceType::X86Pit
+impl<H: X86VlapicHostOps> PitIrqTimer<H> {
+    fn new(vm_id: X86VmId, vcpu_id: X86VcpuId) -> Self {
+        Self {
+            generation: Arc::new(AtomicUsize::new(0)),
+            token: None,
+            vm_id,
+            vcpu_id,
+            _host: PhantomData,
+        }
     }
 
-    fn address_range(&self) -> PortRange {
-        PortRange::new(Port(PIT_CHANNEL0), Port(PIT_PORT_END))
+    fn is_scheduled(&self) -> bool {
+        self.token.is_some()
     }
 
-    fn handle_read(&self, port: Port, width: AccessWidth) -> AxResult<usize> {
-        if width != AccessWidth::Byte {
-            return ax_err!(Unsupported, "x86 PIT only supports byte port reads");
+    fn schedule(&mut self, deadline_ns: u64, period_ns: Option<u64>) {
+        self.cancel();
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.token = schedule_irq0::<H>(
+            deadline_ns,
+            period_ns,
+            Arc::clone(&self.generation),
+            generation,
+            self.vm_id,
+            self.vcpu_id,
+        );
+    }
+
+    fn cancel(&mut self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(token) = self.token.take() {
+            host::cancel_timer::<H>(token);
+        }
+    }
+}
+
+impl<H: X86VlapicHostOps> Drop for PitIrqTimer<H> {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+fn schedule_irq0<H: X86VlapicHostOps>(
+    deadline_ns: u64,
+    period_ns: Option<u64>,
+    generation_state: Arc<AtomicUsize>,
+    generation: usize,
+    vm_id: X86VmId,
+    vcpu_id: X86VcpuId,
+) -> Option<usize> {
+    host::register_timer::<H>(
+        deadline_ns,
+        alloc::boxed::Box::new(move |_| {
+            if generation_state.load(Ordering::Acquire) != generation {
+                return;
+            }
+            let _ = H::inject_pit_irq(vm_id, vcpu_id);
+            if let Some(period_ns) = period_ns
+                && generation_state.load(Ordering::Acquire) == generation
+            {
+                let now_ns = host::current_time_nanos::<H>();
+                let elapsed = now_ns.saturating_sub(deadline_ns);
+                let periods = elapsed / period_ns + 1;
+                let next = deadline_ns.saturating_add(period_ns.saturating_mul(periods));
+                let _ = schedule_irq0::<H>(
+                    next,
+                    Some(period_ns),
+                    generation_state,
+                    generation,
+                    vm_id,
+                    vcpu_id,
+                );
+            }
+        }),
+    )
+}
+
+impl<H: X86VlapicHostOps> EmulatedPit<H> {
+    /// Returns the two disjoint PIT port ranges.
+    pub const fn port_ranges() -> [X86PortRange; 2] {
+        [
+            X86PortRange::new(X86Port::new(PIT_CHANNEL0), X86Port::new(PIT_COMMAND)),
+            X86PortRange::new(
+                X86Port::new(PIT_SPEAKER_CONTROL),
+                X86Port::new(PIT_SPEAKER_CONTROL),
+            ),
+        ]
+    }
+
+    /// Handles a PIT port read.
+    pub fn handle_read(&self, port: X86Port, width: X86AccessWidth) -> X86VlapicResult<usize> {
+        if width != X86AccessWidth::Byte {
+            return Err(X86VlapicError::Unsupported);
         }
 
-        let now_ns = host::current_time_nanos();
+        let now_ns = host::current_time_nanos::<H>();
         let mut state = self.state.lock();
-        let value = match port.0 {
+        let value = match port.number() {
             PIT_CHANNEL0 => state.channel0.read_count(now_ns),
             PIT_CHANNEL2 => state.channel2.read_count(now_ns),
             PIT_COMMAND => 0,
@@ -385,26 +495,53 @@ impl BaseDeviceOps<PortRange> for EmulatedPit {
                 let output = state.channel2.output_high(now_ns) as u8;
                 (state.speaker_control & !0x20) | (output << 5)
             }
-            _ => return ax_err!(Unsupported, "unsupported x86 PIT read port"),
+            _ => return Err(X86VlapicError::Unsupported),
         };
         Ok(value as usize)
     }
 
-    fn handle_write(&self, port: Port, width: AccessWidth, val: usize) -> AxResult {
-        if width != AccessWidth::Byte {
-            return ax_err!(Unsupported, "x86 PIT only supports byte port writes");
+    /// Handles a PIT port write.
+    pub fn handle_write(
+        &self,
+        port: X86Port,
+        width: X86AccessWidth,
+        val: usize,
+    ) -> X86VlapicResult {
+        if width != X86AccessWidth::Byte {
+            return Err(X86VlapicError::Unsupported);
         }
 
-        let now_ns = host::current_time_nanos();
+        let now_ns = host::current_time_nanos::<H>();
         let mut state = self.state.lock();
-        match port.0 {
-            PIT_CHANNEL0 => state.channel0.write_count(val as u8, now_ns),
-            PIT_CHANNEL2 => state.channel2.write_count(val as u8, now_ns),
+        let irq0_schedule = match port.number() {
+            PIT_CHANNEL0 if state.channel0.write_count(val as u8, now_ns) => {
+                let period_ns = state.channel0.period_ns;
+                let repeat_ns = state
+                    .channel0
+                    .mode
+                    .is_periodic_irq()
+                    .then_some(period_ns)
+                    .flatten();
+                Some((state.channel0.next_deadline_ns, repeat_ns))
+            }
+            PIT_CHANNEL0 => None,
+            PIT_CHANNEL2 => {
+                state.channel2.write_count(val as u8, now_ns);
+                None
+            }
             PIT_COMMAND => {
                 Self::write_command(&mut state, val as u8, now_ns);
+                None
             }
-            PIT_SPEAKER_CONTROL => state.speaker_control = val as u8,
-            _ => return ax_err!(Unsupported, "unsupported x86 PIT write port"),
+            PIT_SPEAKER_CONTROL => {
+                state.speaker_control = val as u8;
+                None
+            }
+            _ => return Err(X86VlapicError::Unsupported),
+        };
+        drop(state);
+        if let Some((deadline_ns, period_ns)) = irq0_schedule {
+            self.irq0_timer.lock().schedule(deadline_ns, period_ns);
         }
         Ok(())
     }

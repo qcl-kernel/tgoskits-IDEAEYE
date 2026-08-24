@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4](https://github.com/rcore-os/tgoskits/compare/some-serial-v0.7.3...some-serial-v0.7.4) - 2026-08-20
+
+### Fixed
+
+- *(console)* unify sleepable runtime console arbitration ([#2113](https://github.com/rcore-os/tgoskits/pull/2113))
+- *(some-serial)* bound PL011 early-console startup ([#1983](https://github.com/rcore-os/tgoskits/pull/1983))
+- *(tty)* handle input flush and wakeups ([#1922](https://github.com/rcore-os/tgoskits/pull/1922))
+
+### Other
+
+- *(serial)* establish bounded owner-affine UART runtime ([#2076](https://github.com/rcore-os/tgoskits/pull/2076))
+- *(errors)* introduce domain-owned error boundaries ([#2024](https://github.com/rcore-os/tgoskits/pull/2024))
+
+## [0.7.3](https://github.com/rcore-os/tgoskits/compare/some-serial-v0.7.2...some-serial-v0.7.3) - 2026-08-09
+
+### Other
+
+- updated the following local packages: rdif-serial
+
+## [0.7.2](https://github.com/rcore-os/tgoskits/compare/some-serial-v0.7.1...some-serial-v0.7.2) - 2026-08-03
+
+### Other
+
+- updated the following local packages: rdif-serial
+
+## [0.7.1](https://github.com/rcore-os/tgoskits/compare/some-serial-v0.7.0...some-serial-v0.7.1) - 2026-07-23
+
+### Other
+
+- *(ax-runtime)* centralize UART scheduling ([#1675](https://github.com/rcore-os/tgoskits/pull/1675))
+
 ## [0.7.0](https://github.com/rcore-os/tgoskits/compare/some-serial-v0.6.2...some-serial-v0.7.0) - 2026-06-27
 
 ### Other

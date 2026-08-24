@@ -20,11 +20,15 @@
 //! - `tls`: Enable kernel space thread-local storage support.
 //! - `rtc`: Enable real-time clock support.
 //! - `uspace`: Enable user space support.
+//! - `axtest`: Enable internal AxTest cases.
 //!
 //! [ArceOS]: https://github.com/arceos-org/arceos
 //! [cargo test]: https://doc.rust-lang.org/cargo/guide/tests.html
 
 #![no_std]
+
+#[cfg(all(feature = "uspace", feature = "tls"))]
+compile_error!("ax-hal features `uspace` and `tls` select incompatible register ownership modes");
 
 #[allow(unused_imports)]
 #[macro_use]
@@ -50,6 +54,21 @@ pub mod percpu;
 pub mod pmu;
 pub mod time;
 
+/// White-box checks used only by the Cargo axtest integration target.
+#[cfg(all(axtest, feature = "axtest"))]
+#[doc(hidden)]
+pub mod axtest_support {
+    /// Observes IRQ state during dispatch, preemption release, and return.
+    pub fn observe_irq_entry_state_for_test() -> (bool, bool, bool) {
+        let observation = super::irq::observe_irq_entry_state_for_test();
+        (
+            observation.dispatch_irqs_enabled,
+            observation.after_preempt_release_irqs_enabled,
+            observation.return_irqs_enabled,
+        )
+    }
+}
+
 #[cfg(feature = "tls")]
 pub mod tls;
 
@@ -62,8 +81,10 @@ pub mod paging;
 /// Console input and output.
 pub mod console {
     pub use ax_plat::console::{
-        ConsoleDeviceId, ConsoleDeviceIdError, ConsoleDeviceIdResult, claim_runtime_output,
-        device_id, read_bytes, write_bytes, write_text_bytes,
+        ConsoleDeviceId, ConsoleDeviceIdError, ConsoleDeviceIdResult, ConsoleHandoffError,
+        ConsoleHandoffResult, begin_runtime_handoff, commit_runtime_handoff, device_id,
+        fail_runtime_handoff_closed, read_bytes, rollback_runtime_handoff, write_bytes,
+        write_text_bytes,
     };
     #[cfg(feature = "irq")]
     pub use ax_plat::console::{ConsoleIrqEvent, handle_irq, irq_num, set_input_irq_enabled};
@@ -74,6 +95,29 @@ pub mod power {
     #[cfg(feature = "smp")]
     pub use ax_plat::power::cpu_boot;
     pub use ax_plat::power::{system_off, system_reset};
+}
+
+/// CPU topology.
+pub mod topology {
+    /// Maps a firmware or hardware CPU ID to the runtime logical CPU index.
+    #[cfg(any(test, feature = "host-test"))]
+    pub const fn resolve_cpu_index(hardware_id: usize) -> Option<usize> {
+        if hardware_id == 0 { Some(0) } else { None }
+    }
+
+    #[cfg(not(any(test, feature = "host-test")))]
+    pub use ax_plat::cpu::resolve_cpu_index;
+
+    #[cfg(test)]
+    mod tests {
+        use super::resolve_cpu_index;
+
+        #[test]
+        fn dummy_topology_only_maps_the_boot_cpu() {
+            assert_eq!(resolve_cpu_index(0), Some(0));
+            assert_eq!(resolve_cpu_index(1), None);
+        }
+    }
 }
 
 /// Trap handling.
@@ -91,9 +135,10 @@ pub mod trap {
 /// There are two types of context:
 ///
 /// - [`TaskContext`][ax_cpu::TaskContext]: The context of a task.
-/// - [`TrapFrame`][ax_cpu::TrapFrame]: The context of an interrupt or an exception.
+/// - [`UserRegisters`][ax_cpu::UserRegisters]: User-owned registers saved at a trap boundary.
+/// - [`KernelTrapFrame`][ax_cpu::KernelTrapFrame]: A CPU-pinned view of a kernel trap.
 pub mod context {
-    pub use ax_cpu::{TaskContext, TrapFrame};
+    pub use ax_cpu::{KernelTlsBase, KernelTrapFrame, TaskContext, UserRegisters};
 }
 
 pub use ax_cpu as cpu;
@@ -130,7 +175,7 @@ pub fn init_early_secondary(cpu_id: usize) {
 pub fn cpu_num() -> usize {
     #[cfg(feature = "smp")]
     {
-        use spin::LazyLock;
+        use ax_lazyinit::LazyLock;
 
         /// The number of CPUs in the system. Based on the number declared by the
         /// platform crate and limited by the configured maximum CPU number.

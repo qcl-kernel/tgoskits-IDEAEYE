@@ -27,16 +27,31 @@ mod detect;
 mod guest_mem;
 pub mod host;
 mod percpu;
+mod registers;
 mod regs;
 mod sbi_console;
+mod sbi_ipi;
 mod trap;
+pub mod types;
 mod vcpu;
 mod vpmu;
 
+#[cfg(test)]
+mod world_switch_tests;
+
 pub use detect::{detect_h_extension as has_hardware_support, max_guest_page_table_levels};
 pub use regs::GprIndex;
+pub use types::{
+    RiscvAccessFlags, RiscvAccessWidth, RiscvGuestPhysAddr, RiscvGuestVirtAddr, RiscvHostPhysAddr,
+    RiscvHostVirtAddr, RiscvIpiAbi, RiscvIpiCompletion, RiscvIpiRequest, RiscvNestedPagingConfig,
+    RiscvVcpuError, RiscvVcpuId, RiscvVcpuResult, RiscvVmExit, RiscvVmId,
+};
 
-pub use self::{percpu::RISCVPerCpu, vcpu::RISCVVCpu};
+pub use self::{
+    host::RiscvHostOps,
+    percpu::{RISCVPerCpu, RiscvPerCpu},
+    vcpu::{RISCVVCpu, RiscvVCpu, RiscvVcpu},
+};
 
 /// Extension ID for hypercall, defined by ourselves.
 /// `0x48`, `0x56`, `0x43` is "HVC" in ASCII.
@@ -44,9 +59,9 @@ pub use self::{percpu::RISCVPerCpu, vcpu::RISCVVCpu};
 /// Borrowed from the design of `eid_from_str` in [sbi-spec](https://github.com/rustsbi/rustsbi/blob/62ab2e498ca66cdf75ce049c9dbc2f1862874553/sbi-spec/src/lib.rs#L51)
 pub const EID_HVC: usize = 0x485643;
 
-/// Configuration for creating a new `RISCVVCpu`
+/// Configuration for creating a new `RiscvVcpu`.
 #[derive(Clone, Debug)]
-pub struct RISCVVCpuCreateConfig {
+pub struct RiscvVcpuCreateConfig {
     /// The ID of the vCPU, default to `0`.
     pub hart_id: usize,
     /// The physical address of the device tree blob.
@@ -54,7 +69,7 @@ pub struct RISCVVCpuCreateConfig {
     pub dtb_addr: usize,
 }
 
-impl Default for RISCVVCpuCreateConfig {
+impl Default for RiscvVcpuCreateConfig {
     fn default() -> Self {
         Self {
             hart_id: 0,
@@ -62,3 +77,6 @@ impl Default for RISCVVCpuCreateConfig {
         }
     }
 }
+
+/// Backward-compatible creation config alias.
+pub type RISCVVCpuCreateConfig = RiscvVcpuCreateConfig;

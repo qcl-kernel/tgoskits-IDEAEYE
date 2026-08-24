@@ -2,6 +2,9 @@
 
 use core::{fmt::Display, ops::Deref, ptr::NonNull, sync::atomic::Ordering};
 
+#[cfg(test)]
+extern crate alloc;
+
 #[derive(thiserror::Error, Debug)]
 pub enum MapError {
     #[error("Invalid MMIO address or size")]

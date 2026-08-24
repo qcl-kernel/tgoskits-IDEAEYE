@@ -19,7 +19,7 @@ TGOSKits 的宿主物理设备能力收敛在 `rdrive + rdif` 驱动框架。它
 | `drivers/rdrive-macros/` | 注册宏 | `module_driver!`、linker section 收集 |
 | `drivers/interface/rdif-*/` | 能力边界 | `rdif-block`、`rdif-eth`、`rdif-display`、`rdif-input`、`rdif-vsock`、`rdif-intc`、`rdif-pinctrl`、`rdif-pcie`、`rdif-clk`、`rdif-timer`、`rdif-systick`、`rdif-serial`、`rdif-pwm`、`rdif-power` |
 | `drivers/ax-driver/` | OS glue / ArceOS 适配 | VirtIO、PCI、SoC、USB、serial、block/net/display/input/vsock binding |
-| `drivers/blk/` | 块设备 driver core | `nvme-driver`、`sdhci-host`、`dwmmc-host`、`sdmmc-protocol`、`phytium-mci-host`、`ramdisk` |
+| `drivers/blk/` | 块设备 driver core | `nvme-driver`、`sdhci-host`、`dwmmc-host`、`sdmmc-protocol`、`phytium-mci-host`、`ramdisk`；core 存在不代表 `ax-driver` 已公开注册 |
 | `drivers/net/` | 网卡 driver core | `rd-net`、`fxmac_rs`、`eth-intel`、`realtek-rtl8125` |
 | `drivers/gpu/` | 显示/加速 driver core | `rockchip-rga` |
 | `drivers/intc/` | 中断控制器 driver core | `arm-gic-driver`、`riscv_plic` |
@@ -77,5 +77,3 @@ TGOSKits 的宿主物理设备能力收敛在 `rdrive + rdif` 驱动框架。它
 - 不用字符串拼接或 ad-hoc 匹配替代 FDT compatible、ACPI HID/CID、PCI vendor/device 的结构化匹配。
 - 不在文档或代码中保留“以后补”的占位路径；ACPI 第一版必须返回明确 unsupported error。
 - 除测试外，新增或重构后的单个 `.rs` 文件不超过 600 行。
-
-后续各篇按层次展开：[总体架构](architecture.md)、[rdrive 设备管理](rdrive.md)、[设备探测与初始化](probe.md)、[能力边界 rdif](capability.md)、[IRQ 解析与注册](irq.md)、[驱动分层与 OS Glue](layering.md)、[领域服务与上层消费](services.md)、[Feature 与构建配置](features.md)、[系统集成](integration.md)、[迁移路径与验收](migration.md)。

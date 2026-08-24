@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.18](https://github.com/rcore-os/tgoskits/compare/ax-percpu-v0.4.17...ax-percpu-v0.4.18) - 2026-08-20
+
+### Added
+
+- *(percpu)* add scheduler-owned CPU access ([#2081](https://github.com/rcore-os/tgoskits/pull/2081))
+
+### Other
+
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+### Added
+
+- Add non-escaping current-CPU-area callbacks for future CPU-owned access before
+  a `CpuPin` exists; there is no runtime caller yet.
+
+## [0.4.17](https://github.com/rcore-os/tgoskits/compare/ax-percpu-v0.4.16...ax-percpu-v0.4.17) - 2026-08-09
+
+### Other
+
+- updated the following local packages: ax-percpu-macros, ax-lazyinit
+
+## [0.4.16](https://github.com/rcore-os/tgoskits/compare/ax-percpu-v0.4.15...ax-percpu-v0.4.16) - 2026-08-03
+
+### Other
+
+- updated the following local packages: cpu-local, ax-lazyinit
+
+## [0.4.15](https://github.com/rcore-os/tgoskits/compare/ax-percpu-v0.4.14...ax-percpu-v0.4.15) - 2026-07-23
+
+### Other
+
+- *(cpu-local)* extract per-CPU register ownership ([#1662](https://github.com/rcore-os/tgoskits/pull/1662))
+
+### Changed
+
+- Use dynamically allocated CPU areas exclusively; the ELF now retains one typed template and
+  platforms initialize every runtime area before binding a CPU.
+
+### Removed
+
+- Remove the linked/static storage modes and all compatibility features except `host-test`.
+- Remove the former prefixed/legacy linker sections, symbols, C ABI exports, and linked-layout
+  Rust entry points. The supported contract is `.percpu.template`, `.percpu.init`,
+  `.percpu.align`, `__PERCPU_*`, `__CPU_LOCAL_*`, and the neutral `__percpu_*` initialization ABI.
+
 ## [0.4.14](https://github.com/rcore-os/tgoskits/compare/ax-percpu-v0.4.13...ax-percpu-v0.4.14) - 2026-07-07
 
 ### Other

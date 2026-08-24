@@ -9,6 +9,9 @@ use loongArch64::register::{
     eentry, pgdh, pgdl,
 };
 
+#[cfg(feature = "tls")]
+use crate::KernelTlsBase;
+
 /// Allows the current CPU to respond to interrupts.
 #[inline]
 pub fn enable_irqs() {
@@ -139,6 +142,17 @@ pub fn flush_tlb(vaddr: Option<VirtAddr>) {
     }
 }
 
+/// Makes a page-table entry installed by the local page-fault handler visible
+/// before retrying the faulting instruction.
+///
+/// The software refill path may cache a non-readable and non-executable
+/// placeholder for a missing page-table level. Invalidate that local entry so
+/// the retry refills from the newly installed PTE.
+#[inline]
+pub fn update_mmu_cache(vaddr: VirtAddr) {
+    flush_tlb(Some(vaddr));
+}
+
 /// Writes the Exception Entry Base Address register (`EENTRY`).
 ///
 /// It also set the Exception Configuration register (`ECFG`) to `VS=0`.
@@ -178,26 +192,32 @@ pub unsafe fn write_pwc(pwcl: u32, pwch: u32) {
     }
 }
 
-/// Reads the thread pointer of the current CPU (`$tp`).
+/// Reads the current kernel task's TLS base from `$tp`.
 ///
-/// It is used to implement TLS (Thread Local Storage).
+/// This register follows the execution context across CPUs. It is distinct
+/// from the CPU-local base kept in `$r21`.
 #[inline]
-pub fn read_thread_pointer() -> usize {
-    let tp;
-    unsafe { asm!("move {}, $tp", out(reg) tp) };
-    tp
+#[cfg(feature = "tls")]
+pub fn read_thread_pointer() -> KernelTlsBase {
+    let address;
+    unsafe { asm!("move {}, $tp", out(reg) address) };
+    KernelTlsBase::new(address)
 }
 
-/// Writes the thread pointer of the current CPU (`$tp`).
+/// Writes the current kernel task's TLS base to `$tp`.
 ///
-/// It is used to implement TLS (Thread Local Storage).
+/// This register follows the execution context across CPUs. It is distinct
+/// from the CPU-local base kept in `$r21`.
 ///
 /// # Safety
 ///
-/// This function is unsafe as it changes the CPU states.
+/// The caller must ensure `kernel_tls` belongs to the execution context that
+/// is becoming current and that no Rust code observes a half-completed context
+/// switch.
 #[inline]
-pub unsafe fn write_thread_pointer(tp: usize) {
-    unsafe { asm!("move $tp, {}", in(reg) tp) }
+#[cfg(feature = "tls")]
+pub unsafe fn write_thread_pointer(kernel_tls: KernelTlsBase) {
+    unsafe { asm!("move $tp, {}", in(reg) kernel_tls.as_usize()) }
 }
 
 /// Enables floating-point instructions by setting `EUEN.FPE`.
@@ -223,7 +243,11 @@ pub fn enable_lasx() {
 }
 
 #[cfg(feature = "uspace")]
-core::arch::global_asm!(include_asm_macros!(), include_str!("user_copy.S"));
+core::arch::global_asm!(
+    include_asm_macros!(),
+    include_str!("user_copy.S"),
+    include_str!("user_atomic.S"),
+);
 
 #[cfg(feature = "uspace")]
 unsafe extern "C" {
@@ -237,4 +261,19 @@ unsafe extern "C" {
     /// Returns the number of bytes not copied. This means 0 indicates success,
     /// while a value > 0 indicates failure.
     pub fn user_copy(dst: *mut u8, src: *const u8, size: usize) -> usize;
+}
+
+/// Lock-free EL0/user access probe. No hardware address-translation probe is
+/// wired up on this architecture yet, so always report "not fast-path eligible"
+/// and let the caller take the locked slow path (correctness preserved).
+///
+/// # Safety
+///
+/// No precondition — this stub reads nothing and always returns `false`. It is
+/// `unsafe` only to share the signature of the aarch64 EL1 probe (which requires
+/// IRQs-off), so callers can use one `unsafe` block across all targets.
+#[cfg(feature = "uspace")]
+#[inline]
+pub unsafe fn user_access_ok_page(_vaddr: usize, _write: bool) -> bool {
+    false
 }

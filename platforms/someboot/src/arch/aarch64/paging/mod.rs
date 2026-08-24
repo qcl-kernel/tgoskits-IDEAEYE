@@ -2,14 +2,17 @@ use core::arch::asm;
 
 use aarch64_cpu::asm::barrier::{self, dsb, isb};
 use num_align::NumAlign;
-use page_table_generic::{MapConfig, MemAttributes, PteConfig};
+use page_table_generic::{MapConfig, VirtAddr};
 
 #[cfg(not(feature = "hv"))]
 use crate::arch::elx::set_user_table;
 use crate::{
     arch::elx::{flush_tlb, set_kernal_table, setup_sctlr, setup_table_regs},
     console::print_mapping,
-    mem::{__kimage_va, __percpu, __va, MB, PageTableInfo, page_size},
+    mem::{
+        __kimage_va, __va, MB, MemAttributes, PageTableInfo, PteConfig, cpu_area_phys_to_virt,
+        page_size,
+    },
     smp::PerCpuMeta,
 };
 
@@ -26,8 +29,8 @@ pub fn enable_mmu() -> ! {
     let mmu_entry_phys = super::entry::mmu_entry as *const () as usize;
     println!("MMU Entry point at physical address: {:#x}", mmu_entry_phys);
 
-    let meta = crate::smp::cpu_meta(crate::smp::early_current_cpu_idx()).unwrap();
-    let v_sp = meta.stack_top_virt;
+    let v_sp = crate::smp::primary_stack_top_virtual(crate::smp::early_current_cpu_idx())
+        .expect("primary reserved stack must be addressable before final per-CPU initialization");
     let v_entry = __kimage_va(mmu_entry_phys) as usize;
 
     // Do not touch the debug UART in this final pre-relocation window. Some
@@ -82,7 +85,6 @@ fn setup_page_table() -> anyhow::Result<()> {
     let mut table = crate::mem::mmu::new_boot_table();
 
     let pte = PteConfig {
-        valid: true,
         read: true,
         writable: true,
         executable: true,
@@ -114,7 +116,7 @@ fn setup_page_table() -> anyhow::Result<()> {
     print_mapping("KImage", v_start as _, k_start, size);
 
     table.map(&MapConfig {
-        vaddr: v_start.into(),
+        vaddr: VirtAddr::from_usize(v_start as usize),
         paddr: k_start.into(),
         size,
         pte,
@@ -122,21 +124,20 @@ fn setup_page_table() -> anyhow::Result<()> {
         flush: false,
     })?;
 
-    let percpu_range = crate::smp::percpu_range();
+    let cpu_area_region = crate::smp::cpu_area_region();
     print_mapping(
         "PerCpu",
-        __percpu(percpu_range.start) as _,
-        percpu_range.start,
-        percpu_range.len(),
+        cpu_area_phys_to_virt(cpu_area_region.start) as _,
+        cpu_area_region.start,
+        cpu_area_region.len(),
     );
 
     table
         .map(&MapConfig {
-            vaddr: __percpu(percpu_range.start).into(),
-            paddr: percpu_range.start.into(),
-            size: percpu_range.len(),
+            vaddr: VirtAddr::from_usize(cpu_area_phys_to_virt(cpu_area_region.start) as usize),
+            paddr: cpu_area_region.start.into(),
+            size: cpu_area_region.len(),
             pte: PteConfig {
-                valid: true,
                 read: true,
                 writable: true,
                 executable: true,
@@ -153,7 +154,6 @@ fn setup_page_table() -> anyhow::Result<()> {
         let start = debug_base.align_down(page_size());
         let size = page_size();
         let pte = PteConfig {
-            valid: true,
             read: true,
             writable: true,
             executable: false,

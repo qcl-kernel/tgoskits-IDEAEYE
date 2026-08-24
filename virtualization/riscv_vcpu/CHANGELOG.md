@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/rcore-os/tgoskits/compare/riscv_vcpu-v0.5.20...riscv_vcpu-v0.6.0) - 2026-08-20
+
+### Fixed
+
+- *(riscv-vcpu)* [**breaking**] persist VSEIP while unbound ([#2090](https://github.com/rcore-os/tgoskits/pull/2090))
+
+### Other
+
+- *(axvm)* layer RISC-V SBI IPI routing ([#1920](https://github.com/rcore-os/tgoskits/pull/1920))
+
+## [0.5.20](https://github.com/rcore-os/tgoskits/compare/riscv_vcpu-v0.5.19...riscv_vcpu-v0.5.20) - 2026-08-09
+
+### Fixed
+
+- *(riscv-vcpu)* handle virtual interrupt injection for SMP guests ([#1681](https://github.com/rcore-os/tgoskits/pull/1681))
+
+### Other
+
+- *(axvm)* unify guest devices and AArch64 timer ownership ([#1717](https://github.com/rcore-os/tgoskits/pull/1717))
+
+## [0.5.19](https://github.com/rcore-os/tgoskits/compare/riscv_vcpu-v0.5.18...riscv_vcpu-v0.5.19) - 2026-07-23
+
+### Other
+
+- *(cpu-local)* extract per-CPU register ownership ([#1662](https://github.com/rcore-os/tgoskits/pull/1662))
+
+## [0.5.18](https://github.com/rcore-os/tgoskits/compare/riscv_vcpu-v0.5.17...riscv_vcpu-v0.5.18) - 2026-07-10
+
+### Other
+
+- *(riscv_vcpu)* decouple AxVM adapter and clean exits ([#1556](https://github.com/rcore-os/tgoskits/pull/1556))
+
 ## [0.5.17](https://github.com/rcore-os/tgoskits/compare/riscv_vcpu-v0.5.16...riscv_vcpu-v0.5.17) - 2026-07-07
 
 ### Other

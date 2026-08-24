@@ -9,7 +9,7 @@ pub(crate) mod irq;
 mod paging;
 pub(crate) mod power;
 pub(crate) mod relocate;
-mod trap;
+pub(crate) mod trap;
 
 use core::ptr::null;
 
@@ -41,7 +41,7 @@ impl ArchTrait for Arch {
         Self::_va(paddr)
     }
 
-    fn _percpu(paddr: usize) -> *mut u8 {
+    fn cpu_area_phys_to_virt(paddr: usize) -> *mut u8 {
         (paddr + addrspace::PERCPU_BASE) as *mut u8
     }
 
@@ -138,32 +138,8 @@ impl ArchTrait for Arch {
         _secondary_entry as *const ()
     }
 
-    fn cpu_on(hartid: usize, entry: usize, arg: usize) -> Result<(), CpuOnError> {
-        power::cpu_on(hartid, entry, arg)
-    }
-
-    fn systimer_enable() {
-        trap::timer_enable();
-    }
-
-    fn systimer_irq_enable() {
-        trap::timer_irq_enable();
-    }
-
-    fn systimer_irq_disable() {
-        trap::timer_irq_disable();
-    }
-
-    fn systimer_irq_is_enabled() -> bool {
-        trap::timer_irq_is_enabled()
-    }
-
-    fn systimer_set_interval(ticks: usize) {
-        trap::timer_set_deadline_in_ticks(ticks);
-    }
-
-    fn systimer_ack() {
-        trap::timer_ack();
+    fn kick_secondary_cpu(hartid: usize, entry: usize, arg: usize) -> Result<(), CpuOnError> {
+        power::kick_secondary_cpu(hartid, entry, arg)
     }
 
     fn systimer_freq() -> usize {
@@ -174,26 +150,16 @@ impl ArchTrait for Arch {
         trap::ticks_now() as usize
     }
 
+    fn systimer_stability() -> crate::timer::CounterStability {
+        trap::scheduler_counter_stability()
+    }
+
     fn irq_all_is_enabled() -> bool {
         trap::irq_local_enabled()
     }
 
     fn irq_all_set_enable(enable: bool) {
-        trap::irq_local_set_enabled(enable);
-    }
-
-    fn irq_is_enabled(irq: crate::irq::IrqId) -> bool {
-        irq == irq::systimer_irq() && trap::timer_irq_is_enabled()
-    }
-
-    fn irq_set_enable(irq: crate::irq::IrqId, enable: bool) {
-        if irq == irq::systimer_irq() {
-            if enable {
-                trap::timer_irq_enable();
-            } else {
-                trap::timer_irq_disable();
-            }
-        }
+        trap::irq_local_set_enabled(enable)
     }
 
     fn dcache_range(_op: DCacheOp, _addr: usize, _size: usize) {

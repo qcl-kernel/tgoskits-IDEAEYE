@@ -210,10 +210,10 @@ impl GemPool {
                     }
 
                     if args.flags & RKNPU_MEM_SYNC_TO_DEVICE != 0 {
-                        data.prepare_for_device(offset, size);
+                        data.prepare_for_device(offset..offset + size);
                     }
                     if args.flags & RKNPU_MEM_SYNC_FROM_DEVICE != 0 {
-                        data.complete_for_cpu(offset, size);
+                        data.complete_for_cpu(offset..offset + size);
                     }
                     return Ok(());
                 }
@@ -242,7 +242,7 @@ impl GemPool {
     pub fn comfirm_write_all(&mut self) -> Result<(), RknpuError> {
         for buffer in self.pool.values_mut() {
             if let GemBuffer::Owned { data, .. } = buffer {
-                data.prepare_for_device_all();
+                data.prepare_for_device(0..data.bytes_len());
             }
         }
         Ok(())
@@ -251,7 +251,7 @@ impl GemPool {
     pub fn prepare_read_all(&mut self) -> Result<(), RknpuError> {
         for buffer in self.pool.values_mut() {
             if let GemBuffer::Owned { data, .. } = buffer {
-                data.complete_for_cpu_all();
+                data.complete_for_cpu(0..data.bytes_len());
             }
         }
         Ok(())
@@ -290,7 +290,7 @@ mod tests {
         unsafe fn alloc_coherent(&self, _: DmaConstraints, _: Layout) -> Option<DmaAllocHandle> {
             panic!("imported-buffer path must not allocate")
         }
-        unsafe fn dealloc_coherent(&self, _: DmaAllocHandle) {
+        unsafe fn dealloc_coherent(&self, _: DmaAllocHandle) -> Result<(), DmaError> {
             panic!("imported-buffer path must not deallocate")
         }
         unsafe fn map_streaming(
@@ -309,7 +309,14 @@ mod tests {
 
     fn import_only_pool() -> GemPool {
         static OP: NoAllocOp = NoAllocOp;
-        GemPool::new(DeviceDma::new_legacy(u32::MAX as u64, &OP))
+        GemPool::new(DeviceDma::new(
+            dma_api::DmaDeviceInfo::new(
+                dma_api::DmaDomainId::Direct,
+                dma_api::DmaCoherency::NonCoherent,
+                dma_api::DmaConstraints::new(u32::MAX as u64),
+            ),
+            &OP,
+        ))
     }
 
     /// A retainer whose drop is observable, standing in for an exporter's backing

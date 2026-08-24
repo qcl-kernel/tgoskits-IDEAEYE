@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/rcore-os/tgoskits/compare/pcie-v0.6.9...pcie-v0.7.0) - 2026-08-20
+
+### Other
+
+- *(axtest)* standardize Cargo and QEMU test flow ([#2088](https://github.com/rcore-os/tgoskits/pull/2088))
+
+## [0.6.9](https://github.com/rcore-os/tgoskits/compare/pcie-v0.6.8...pcie-v0.6.9) - 2026-08-09
+
+### Other
+
+- updated the following local packages: axtest, mmio-api, rdif-msi, rdif-pcie
+
+## [0.6.8](https://github.com/rcore-os/tgoskits/compare/pcie-v0.6.7...pcie-v0.6.8) - 2026-08-03
+
+### Other
+
+- enhance axtest coverage for various starry-kernel contracts ([#1674](https://github.com/rcore-os/tgoskits/pull/1674))
+
+## [0.6.7](https://github.com/rcore-os/tgoskits/compare/pcie-v0.6.6...pcie-v0.6.7) - 2026-07-10
+
+### Other
+
+- updated the following local packages: rdif-msi
+
 ## [0.6.6](https://github.com/rcore-os/tgoskits/compare/pcie-v0.6.5...pcie-v0.6.6) - 2026-07-07
 
 ### Added

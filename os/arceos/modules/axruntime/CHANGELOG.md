@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.7...ax-runtime-v0.11.0) - 2026-08-20
+
+### Added
+
+- *(dma-api)* [**breaking**] add device DMA coherency with uncached-alias remap ([#2106](https://github.com/rcore-os/tgoskits/pull/2106))
+
+### Fixed
+
+- *(console)* unify sleepable runtime console arbitration ([#2113](https://github.com/rcore-os/tgoskits/pull/2113))
+- *(axtask)* preserve scheduler-frame ownership across switches ([#2101](https://github.com/rcore-os/tgoskits/pull/2101))
+- *(ax-cpu)* harden user access and architecture state transitions ([#2075](https://github.com/rcore-os/tgoskits/pull/2075))
+- *(tty)* handle input flush and wakeups ([#1922](https://github.com/rcore-os/tgoskits/pull/1922))
+
+### Other
+
+- *(serial)* establish bounded owner-affine UART runtime ([#2076](https://github.com/rcore-os/tgoskits/pull/2076))
+- *(cpu-local)* define scheduler-neutral execution context boundary ([#2080](https://github.com/rcore-os/tgoskits/pull/2080))
+- *(errors)* introduce domain-owned error boundaries ([#2024](https://github.com/rcore-os/tgoskits/pull/2024))
+- *(sync)* move lock implementation into ax-task ([#1962](https://github.com/rcore-os/tgoskits/pull/1962))
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+## [0.10.7](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.6...ax-runtime-v0.10.7) - 2026-08-09
+
+### Fixed
+
+- *(ax-plat)* add corrected scheduler clock source ([#1900](https://github.com/rcore-os/tgoskits/pull/1900))
+
+### Other
+
+- *(ax-ipi)* establish typed IPI publication transport ([#1916](https://github.com/rcore-os/tgoskits/pull/1916))
+- *(repo)* unify workspace dependencies ([#1860](https://github.com/rcore-os/tgoskits/pull/1860))
+- *(axvm)* unify guest devices and AArch64 timer ownership ([#1717](https://github.com/rcore-os/tgoskits/pull/1717))
+
+## [0.10.6](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.5...ax-runtime-v0.10.6) - 2026-08-03
+
+### Added
+
+- *(ahci-driver)* add portable multi-disk AHCI support ([#1795](https://github.com/rcore-os/tgoskits/pull/1795))
+
+### Fixed
+
+- *(dma-api)* retire legacy axdma release paths ([#1796](https://github.com/rcore-os/tgoskits/pull/1796))
+- *(ax-runtime)* restore CRLF for queued console logs ([#1695](https://github.com/rcore-os/tgoskits/pull/1695))
+
+### Other
+
+- *(block)* adopt IRQ-driven multi-queue runtime ([#1768](https://github.com/rcore-os/tgoskits/pull/1768))
+
+### Changed
+
+- Provide the task, fixed-affinity IRQ, and SMP-online capabilities used by the
+  IRQ-driven block multi-queue runtime.
+
+## [0.10.5](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.4...ax-runtime-v0.10.5) - 2026-07-23
+
+### Other
+
+- *(ax-runtime)* centralize UART scheduling ([#1675](https://github.com/rcore-os/tgoskits/pull/1675))
+- *(cpu-local)* extract per-CPU register ownership ([#1662](https://github.com/rcore-os/tgoskits/pull/1662))
+
+## [0.10.4](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.3...ax-runtime-v0.10.4) - 2026-07-10
+
+### Added
+
+- *(msi)* add hierarchical MSI-X irq domains ([#1526](https://github.com/rcore-os/tgoskits/pull/1526))
+
+## [0.10.3](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.2...ax-runtime-v0.10.3) - 2026-07-08
+
+### Fixed
+
+- *(platforms)* route DMA cache sync through platform cache ops ([#1542](https://github.com/rcore-os/tgoskits/pull/1542))
+
 ## [0.10.2](https://github.com/rcore-os/tgoskits/compare/ax-runtime-v0.10.1...ax-runtime-v0.10.2) - 2026-07-08
 
 ### Other

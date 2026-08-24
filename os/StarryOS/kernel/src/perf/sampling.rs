@@ -44,9 +44,13 @@
 use core::sync::atomic::Ordering;
 
 use ax_hal::irq::{IrqContext, IrqId, IrqReturn};
-use ax_kernel_guard::NoPreemptIrqSave;
 use ax_task::IrqNotify;
 use kbpf_basic::linux_bpf::perf_event_mmap_page;
+
+use crate::{
+    sync::PreemptIrqSaveGuard,
+    task::{AsThread, PidNamespaceId, TgidNumber, TidNumber},
+};
 
 fn pmu_irq() -> Result<IrqId, ax_hal::irq::IrqError> {
     ax_hal::pmu::irq()
@@ -172,6 +176,8 @@ pub struct SampleSlot {
     /// fields. `0` when the event was opened without per-event ids (the common
     /// case in this single-group implementation).
     pub id: u64,
+    /// PID namespace view captured by the event owner.
+    pub observer: PidNamespaceId,
     /// Raw pointer to the owning event's [`IrqNotify`], woken after each sample.
     /// Kept alive by the event's strong `Arc<IrqNotify>` for as long as the slot
     /// is registered (see module docs).
@@ -210,6 +216,29 @@ static REGISTRY: [Option<SampleSlot>; 32] = [None; 32];
 /// registry, so a single action installed on all CPUs suffices.
 static REGISTERED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// Mutates the current CPU's sampling registry without exposing a reference
+/// beyond the CPU-local exclusive-access scope.
+///
+/// # Safety
+///
+/// The caller must prevent migration, local IRQ re-entry, and remote mutation
+/// for the complete callback. Process-context callers use
+/// [`NoPreemptIrqSave`]; the overflow handler already runs with local IRQs
+/// masked on the CPU that owns the registry.
+unsafe fn with_registry_mut<R>(
+    operation: impl for<'value> FnOnce(&'value mut [Option<SampleSlot>; 32]) -> R,
+) -> R {
+    // SAFETY: the caller establishes the migration and exclusion contract.
+    unsafe {
+        ax_percpu::with_cpu_pin(|pin| {
+            ax_percpu::with_exclusive_cpu(pin, |exclusive| {
+                REGISTRY.with_current_mut(exclusive, operation)
+            })
+        })
+    }
+    .unwrap_or_else(|error| panic!("perf sampling CPU-local state is invalid: {error}"))
+}
+
 /// Registers `slot` for programmable counter `n` on the current CPU.
 ///
 /// Runs in process context on the event's core (cpu0 under smp1). The mutation
@@ -220,11 +249,10 @@ pub fn register(n: usize, slot: SampleSlot) {
     if n > MAX_COUNTER {
         return;
     }
-    let _guard = NoPreemptIrqSave::new();
+    let _guard = PreemptIrqSaveGuard::new();
     // SAFETY: preemption and local IRQs are disabled by `_guard`, so we hold
     // exclusive access to this CPU's `REGISTRY` for the critical section.
-    let registry = unsafe { REGISTRY.current_ref_mut_raw() };
-    registry[n] = Some(slot);
+    unsafe { with_registry_mut(|registry| registry[n] = Some(slot)) };
 }
 
 /// Clears the sampling slot for programmable counter `n` on the current CPU.
@@ -236,10 +264,9 @@ pub fn unregister(n: usize) {
     if n > MAX_COUNTER {
         return;
     }
-    let _guard = NoPreemptIrqSave::new();
+    let _guard = PreemptIrqSaveGuard::new();
     // SAFETY: see `register`.
-    let registry = unsafe { REGISTRY.current_ref_mut_raw() };
-    registry[n] = None;
+    unsafe { with_registry_mut(|registry| registry[n] = None) };
 }
 
 /// Ensures [`pmu_overflow_handler`] is registered with the IRQ framework and the
@@ -326,90 +353,121 @@ pub fn pmu_overflow_handler(_ctx: IrqContext) -> IrqReturn {
 
         // SAFETY: we run on the core that took the IRQ with local IRQs masked,
         // so this CPU's `REGISTRY` is not being mutated concurrently (register /
-        // unregister disable local IRQs). Take a mutable borrow so frequency
-        // mode can write the adapted period/`last_time` back into the slot.
-        let registry = unsafe { REGISTRY.current_ref_mut_raw() };
-        let Some(slot) = registry[n].as_mut() else {
-            // Overflow on a counter with no sampling slot (e.g. a counting-only
-            // event that happened to wrap with its IRQ somehow set): just clear
-            // it below. Do not re-arm — counting events manage their own value.
-            continue;
-        };
+        // unregister disable local IRQs). The mutable borrow remains inside the
+        // scoped callback while frequency mode updates `period`/`last_time`.
+        let sample = |registry: &mut [Option<SampleSlot>; 32]| {
+            let Some(slot) = registry[n].as_mut() else {
+                // A counting-only counter may wrap without a sampling slot.
+                // Clear it below but leave re-arming to its owner.
+                return false;
+            };
 
-        // Snapshot the fields the record + re-arm need (copied out so the slot
-        // can be mutated below without aliasing the borrow).
-        let sample_type = slot.sample_type;
-        let id = slot.id;
-        let notify_ptr = slot.notify;
-        let ring_vaddr = slot.ring_vaddr;
-        let ring_len = slot.ring_len;
-        let cur_period = slot.period;
+            // Snapshot the fields the record + re-arm need (copied out so the slot
+            // can be mutated below without aliasing the borrow).
+            let sample_type = slot.sample_type;
+            let id = slot.id;
+            let notify_ptr = slot.notify;
+            let ring_vaddr = slot.ring_vaddr;
+            let ring_len = slot.ring_len;
+            let cur_period = slot.period;
 
-        // Build one PERF_RECORD_SAMPLE honouring the event's `sample_type`
-        // (validated at open to set IP and only supported bits). pid/tid are
-        // best-effort: the interrupted task's scheduler id (non-zero, stable per
-        // task) — enough for perf to parse + count samples; precise user TID is a
-        // future refinement. time/cpu are the real interrupt-time values.
-        let tid = ax_task::current().id().as_u64() as u32;
-        let time = ax_runtime::hal::time::monotonic_time_nanos();
-        let cpu = ax_hal::percpu::this_cpu_id() as u32;
-        let mut record = [0u8; SAMPLE_RECORD_MAX_LEN];
-        let data = SampleData {
-            ip,
-            pid: tid, // best-effort: same scheduler id for pid and tid
-            tid,
-            time,
-            addr: 0,
-            id,
-            stream_id: 0,
-            cpu,
-            period: cur_period as u64,
-        };
-        let len = build_sample(&mut record, sample_type, misc, &data);
+            // Build one PERF_RECORD_SAMPLE honouring the event's `sample_type`
+            // (validated at open to set IP and only supported bits). PID fields
+            // use the view captured by the perf event; the scheduler TaskId
+            // never crosses the Linux perf ABI boundary. A system-wide counter
+            // can overflow while a kernel task is running, in which case there
+            // is no Linux PID identity and the wire fields remain zero.
+            let (pid, tid) = current_sample_ids(slot.observer);
+            let time = ax_runtime::hal::time::monotonic_time_nanos();
+            let cpu = ax_hal::percpu::this_cpu_id() as u32;
+            let mut record = [0u8; SAMPLE_RECORD_MAX_LEN];
+            let data = SampleData {
+                ip,
+                pid,
+                tid,
+                time,
+                addr: 0,
+                id,
+                stream_id: 0,
+                cpu,
+                period: cur_period as u64,
+            };
+            let len = build_sample(&mut record, sample_type, misc, &data);
 
-        // SAFETY: `ring_vaddr`/`ring_len` describe live, kernel-mapped pages for
-        // as long as the slot is registered (the event pins them, and teardown
-        // unregisters before freeing). `ring_write` only touches that region.
-        unsafe { ring_write(ring_vaddr, ring_len, &record[..len]) };
+            // SAFETY: `ring_vaddr`/`ring_len` describe live, kernel-mapped pages for
+            // as long as the slot is registered (the event pins them, and teardown
+            // unregisters before freeing). `ring_write` only touches that region.
+            unsafe { ring_write(ring_vaddr, ring_len, &record[..len]) };
 
-        // Frequency mode: adapt the period toward the target rate and persist it
-        // (plus the sample timestamp) in the slot for the next interval. Fixed
-        // mode re-arms with the unchanged period.
-        let next_period = if slot.freq {
-            let np = if slot.last_time != 0 {
-                next_freq_period(
-                    cur_period,
-                    slot.target_freq,
-                    time.saturating_sub(slot.last_time),
-                )
+            // Frequency mode: adapt the period toward the target rate and persist it
+            // (plus the sample timestamp) in the slot for the next interval. Fixed
+            // mode re-arms with the unchanged period.
+            let next_period = if slot.freq {
+                let np = if slot.last_time != 0 {
+                    next_freq_period(
+                        cur_period,
+                        slot.target_freq,
+                        time.saturating_sub(slot.last_time),
+                    )
+                } else {
+                    cur_period
+                };
+                slot.period = np;
+                slot.last_time = time;
+                np
             } else {
                 cur_period
             };
-            slot.period = np;
-            slot.last_time = time;
-            np
-        } else {
-            cur_period
+
+            // Re-arm the counter for the next sample.
+            ax_cpu::pmu::counter::preload(n, next_period);
+
+            // Wake the deferred worker so it can deliver POLLIN. A redirected event
+            // (`PERF_EVENT_IOC_SET_OUTPUT` into another event's ring) writes into the
+            // leader's ring but has no notify of its own — its `notify` is null, and
+            // the leader's own poller re-checks `data_head` on its next poll. The
+            // pointer, when non-null, is valid: the owning event holds the backing
+            // `Arc<IrqNotify>` while registered (see the module-level soundness note).
+            if !notify_ptr.is_null() {
+                let notify = unsafe { &*(notify_ptr as *const IrqNotify) };
+                notify.notify_irq();
+            }
+            true
         };
-
-        // Re-arm the counter for the next sample.
-        ax_cpu::pmu::counter::preload(n, next_period);
-
-        // Wake the deferred worker so it can deliver POLLIN. A redirected event
-        // (`PERF_EVENT_IOC_SET_OUTPUT` into another event's ring) writes into the
-        // leader's ring but has no notify of its own — its `notify` is null, and
-        // the leader's own poller re-checks `data_head` on its next poll. The
-        // pointer, when non-null, is valid: the owning event holds the backing
-        // `Arc<IrqNotify>` while registered (see the module-level soundness note).
-        if !notify_ptr.is_null() {
-            let notify = unsafe { &*(notify_ptr as *const IrqNotify) };
-            notify.notify_irq();
+        // SAFETY: the handler runs with local IRQs masked on its current CPU,
+        // so the registry cannot be re-entered or accessed after migration.
+        let sampled = unsafe { with_registry_mut(sample) };
+        if !sampled {
+            continue;
         }
     }
 
     // Clear exactly the overflow bits we serviced.
     ax_cpu::pmu::overflow::clear(handled);
     IrqReturn::Handled
+}
+
+fn current_sample_ids(observer: PidNamespaceId) -> (Option<TgidNumber>, Option<TidNumber>) {
+    let task = ax_task::current();
+    let Some(thread) = task.try_as_thread() else {
+        return (None, None);
+    };
+    let tid = thread
+        .pid_identity()
+        .visible_number_in(observer)
+        .map(TidNumber::from);
+    let pid = thread
+        .proc_data
+        .identity()
+        .visible_number_in(observer)
+        .map(TgidNumber::from);
+    (pid, tid)
+}
+
+#[cfg(axtest)]
+pub(crate) fn kernel_task_sample_ids_are_empty_for_test() -> bool {
+    let (pid, tid) = current_sample_ids(crate::task::ROOT_PID_NS.id());
+    pid.is_none() && tid.is_none()
 }
 
 /// Lays out one `PERF_RECORD_SAMPLE` into `buf` per `sample_type`, returning its
@@ -437,8 +495,8 @@ pub fn pmu_overflow_handler(_ctx: IrqContext) -> IrqReturn {
 /// `sample_type` alone). Gathered by the overflow handler at interrupt time.
 struct SampleData {
     ip: u64,
-    pid: u32,
-    tid: u32,
+    pid: Option<TgidNumber>,
+    tid: Option<TidNumber>,
     time: u64,
     addr: u64,
     id: u64,
@@ -476,8 +534,8 @@ fn build_sample(buf: &mut [u8], sample_type: u64, misc: u16, d: &SampleData) -> 
     }
     if sample_type & PERF_SAMPLE_TID != 0 {
         // pid and tid are a packed `u32` pair in one 8-byte slot.
-        put!(d.pid);
-        put!(d.tid);
+        put!(d.pid.map_or(0, TgidNumber::get));
+        put!(d.tid.map_or(0, TidNumber::get));
     }
     if sample_type & PERF_SAMPLE_TIME != 0 {
         put!(d.time);
@@ -604,7 +662,7 @@ unsafe fn ring_write(ring_vaddr: usize, ring_len: usize, record: &[u8]) {
 /// duration of the call (the event holds the backing `Arc` while the slot/ring is
 /// registered).
 pub unsafe fn ring_write_process(ring_vaddr: usize, ring_len: usize, record: &[u8]) {
-    let _guard = NoPreemptIrqSave::new();
+    let _guard = PreemptIrqSaveGuard::new();
     // SAFETY: caller upholds the ring liveness contract; IRQs are masked so the
     // overflow handler cannot race this write on the current core.
     unsafe { ring_write(ring_vaddr, ring_len, record) };

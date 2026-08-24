@@ -46,6 +46,7 @@ model_register!(
 mod binding_info;
 mod binding_resolver;
 pub mod error;
+mod irq_binding;
 pub mod mmio;
 #[cfg(any(
     feature = "block",
@@ -83,7 +84,6 @@ pub mod serial;
 #[cfg(any(
     feature = "rockchip-soc",
     feature = "rockchip-pm",
-    feature = "rockchip-dwmmc",
     feature = "starfive-soc"
 ))]
 pub mod soc;
@@ -93,6 +93,44 @@ pub mod time;
 pub mod usb;
 #[cfg(virtio_dev)]
 pub mod virtio;
+
+/// RK3588 CPU DVFS ondemand governor, exposed as a stable, arch-neutral entry
+/// the kernel can drive from a periodic task without knowing the SoC specifics.
+///
+/// The governor's *policy + apply* live in the (arch-specific) cpufreq driver,
+/// but its *loop* — sleeping between samples and reading the per-CPU busy
+/// counters — cannot live in this crate: ax-driver sits below ax-task/ax-hal in
+/// the dependency graph, so spawning a task here would be a cyclic dependency.
+/// The kernel therefore owns the loop and calls [`cpufreq::governor_poll`] each
+/// tick. When the DVFS feature is off these are no-ops so callers stay generic.
+pub mod cpufreq {
+    #[cfg(feature = "rk3588-cpufreq")]
+    pub use crate::soc::rockchip::cpufreq::{
+        calibrate_cluster, calibrate_wanted, governor_period_ms, governor_poll, governor_wanted,
+    };
+
+    /// Feature-off stub: no governor, so the kernel never spawns its task.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn governor_wanted() -> bool {
+        false
+    }
+    /// Feature-off stub.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn governor_period_ms() -> u64 {
+        100
+    }
+    /// Feature-off stub.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn governor_poll(_busy: &[u64]) {}
+    /// Feature-off stub: no calibration.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn calibrate_wanted() -> bool {
+        false
+    }
+    /// Feature-off stub.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn calibrate_cluster(_cluster_idx: usize, _intended_cpu: usize) {}
+}
 
 #[cfg(feature = "pci")]
 pub use binding_info::PciIrqRequirement;
@@ -104,3 +142,104 @@ pub use binding_resolver::{
     binding_irq_from_named_fdt_interrupt,
 };
 pub use error::{Error, Result};
+pub use irq_binding::IrqBindingLease;
+
+#[cfg(test)]
+mod test_runtime {
+    use axklib::{
+        BoxedIrqHandler, ConcurrentBoxedIrqHandler, IrqCpuMask, IrqHandle, IrqId, Klib, KlibError,
+        KlibResult, PhysAddr, VirtAddr, impl_trait,
+    };
+
+    struct TestKlib;
+
+    // `impl_trait!` publishes one set of global axklib symbols. Keep the test
+    // implementation crate-wide so independently enabled driver modules can
+    // coexist in the same unit-test binary.
+    impl_trait! {
+        impl Klib for TestKlib {
+            fn mem_iomap(_addr: PhysAddr, _size: usize) -> KlibResult<VirtAddr> {
+                Err(KlibError::Unsupported)
+            }
+
+            fn mem_virt_to_phys(addr: VirtAddr) -> PhysAddr {
+                PhysAddr::from_usize(addr.as_usize())
+            }
+
+            fn mem_map_dma_coherent_uncached(
+                _addr: core::ptr::NonNull<u8>,
+                _size: usize,
+            ) -> axklib::DmaCoherentMappingOutcome {
+                axklib::DmaCoherentMappingOutcome::NotStarted(KlibError::Unsupported)
+            }
+
+            fn mem_unmap_dma_coherent(_addr: core::ptr::NonNull<u8>, _size: usize) -> KlibResult {
+                Err(KlibError::Unsupported)
+            }
+
+            fn dma_cache_clean(_addr: VirtAddr, _size: usize) {}
+
+            fn dma_cache_invalidate(_addr: VirtAddr, _size: usize) {}
+
+            fn dma_cache_clean_invalidate(_addr: VirtAddr, _size: usize) {}
+
+            fn dma_alloc_pages(
+                _dma_mask: u64,
+                _num_pages: usize,
+                _align: usize,
+            ) -> KlibResult<core::ptr::NonNull<u8>> {
+                Err(KlibError::Unsupported)
+            }
+
+            fn dma_dealloc_pages(_addr: core::ptr::NonNull<u8>, _num_pages: usize) {}
+
+            fn time_busy_wait(_dur: core::time::Duration) {}
+
+            fn time_monotonic_nanos() -> u64 {
+                0
+            }
+
+            fn time_try_init_epoch_offset(_epoch_time_nanos: u64) -> bool {
+                false
+            }
+
+            fn irq_set_enable(_irq: IrqId, _enabled: bool) -> KlibResult {
+                Ok(())
+            }
+
+            fn irq_request_shared(
+                _irq: IrqId,
+                _handler: BoxedIrqHandler,
+            ) -> KlibResult<IrqHandle> {
+                Err(KlibError::Unsupported)
+            }
+
+            fn irq_request_shared_disabled(
+                _irq: IrqId,
+                _handler: BoxedIrqHandler,
+            ) -> KlibResult<IrqHandle> {
+                Err(KlibError::Unsupported)
+            }
+
+            fn irq_request_percpu(
+                _irq: IrqId,
+                _cpus: IrqCpuMask,
+                _handler: ConcurrentBoxedIrqHandler,
+            ) -> KlibResult<IrqHandle> {
+                Err(KlibError::Unsupported)
+            }
+
+            fn irq_free(_handle: IrqHandle) -> KlibResult {
+                Err(KlibError::Unsupported)
+            }
+
+            fn irq_enable(_handle: IrqHandle) -> KlibResult {
+                Err(KlibError::Unsupported)
+            }
+
+            fn irq_disable(_handle: IrqHandle) -> KlibResult {
+                Err(KlibError::Unsupported)
+            }
+        }
+    }
+}

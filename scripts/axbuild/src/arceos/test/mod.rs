@@ -1,6 +1,5 @@
 mod args;
 mod assets;
-mod axtest_qemu;
 mod board;
 mod c_qemu;
 mod discovery;
@@ -21,7 +20,6 @@ const ARCEOS_TEST_SUITE_OS: &str = "arceos";
 const ARCEOS_RUST_TEST_PACKAGE: &str = "arceos-test-suit";
 const ARCEOS_RUST_TEST_BUILD_GROUP: &str = "arceos-test-suit";
 const ARCEOS_C_TEST_BUILD_GROUP: &str = "arceos-c-test-suit";
-
 const ARCEOS_RUST_ALL_FEATURE: &str = "all";
 const ARCEOS_C_ALL_FEATURE: &str = "all";
 const ARCEOS_RUST_DEBUG_BACKTRACE_FEATURE: &str = "debug-backtrace";
@@ -35,6 +33,7 @@ const ARCEOS_RUST_QEMU_FEATURES: &[&str] = &[
     ARCEOS_RUST_DEBUG_BACKTRACE_FEATURE,
     ARCEOS_RUST_DEBUG_PANIC_PATH_FEATURE,
     "display-basic",
+    "eventfd-epoll",
     "exception-breakpoint",
     ARCEOS_RUST_EXCEPTION_PAGE_FAULT_FEATURE,
     "fs-basic",
@@ -45,6 +44,7 @@ const ARCEOS_RUST_QEMU_FEATURES: &[&str] = &[
     "sched-cfs",
     "sched-rr",
     "task-affinity",
+    "task-cyclictest",
     "task-ipi",
     "task-irq",
     "task-parallel",

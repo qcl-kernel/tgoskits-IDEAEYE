@@ -69,6 +69,8 @@ trap_handler_table:
 .endm
 
 .section .text
+.type trap_vector_entries, @function
+trap_vector_entries:
 .set i, 0
 .rept NUM_INT
     DEF_HANDLER %i
@@ -93,15 +95,16 @@ trap_handler_table:
     POP_GENERAL_REGS
     add     rsp, 16                     # pop vector, error_code
     iretq
+.size trap_vector_entries, . - trap_vector_entries
 
 .global syscall_entry
 syscall_entry:
     swapgs                              # swap in kernel gs
-    mov     gs:[offset __PERCPU_TSS + 12], rsp # store user rsp -> scratch at TSS.sp1
-    mov     rsp, gs:[offset __PERCPU_TSS + 4]  # load end of TrapFrame <- TSS.sp0
+    mov     gs:[offset __CPU_LOCAL_TSS_OFFSET + 12], rsp # store user rsp -> scratch at TSS.sp1
+    mov     rsp, gs:[offset __CPU_LOCAL_TSS_OFFSET + 4]  # load end of TrapFrame <- TSS.sp0
 
     push    {UDATA}                     # push ss
-    push    gs:[offset __PERCPU_TSS + 12]      # push rsp
+    push    gs:[offset __CPU_LOCAL_TSS_OFFSET + 12]      # push rsp
     push    r11                         # push rflags
     push    {UCODE64}                   # push cs
     push    rcx                         # push rip
@@ -112,8 +115,11 @@ syscall_entry:
 .Lexit_user:
     PUSH_GENERAL_REGS
 
-    # restore kernel context
-    mov     rsp, [rsp + {trapframe_size}]
+    # LinuxCurrent kernels do not own FS and CR4.FSGSBASE is disabled. The
+    # user TLS image therefore remains authoritative across the trap; only GS
+    # is swapped to the CPU area before returning to Rust.
+    mov     r8, [rsp + {kernel_stack_pointer_offset}]
+    mov     rsp, r8
     pop     r15
     pop     r14
     pop     r13
@@ -131,11 +137,12 @@ enter_user:
     push r13
     push r14
     push r15
-    mov [rdi + {trapframe_size}], rsp
+
+    mov [rdi + {kernel_stack_pointer_offset}], rsp
 
     mov rsp, rdi
     add rdi, {trapframe_size}
-    mov gs:[offset __PERCPU_TSS + 4], rdi      # store end of TrapFrame -> TSS.sp0
+    mov gs:[offset __CPU_LOCAL_TSS_OFFSET + 4], rdi      # store end of TrapFrame -> TSS.sp0
 
     swapgs                              # swap in user gs
 

@@ -1,0 +1,17 @@
+[package]
+name = "starry-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "AXNET/1 TCP client for StarryOS: heartbeat, reconnect, latency and throughput"
+
+[lib]
+name = "starry_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "starry-client"
+path = "src/main.rs"
+
+[dependencies]
+axnet1 = { workspace = true }

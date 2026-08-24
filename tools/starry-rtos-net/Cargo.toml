@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/axnet1",
+    "crates/starry-client",
+    "crates/rtos-tester",
+    "tests/integration",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+axnet1 = { path = "crates/axnet1" }

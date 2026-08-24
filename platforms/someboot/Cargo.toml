@@ -7,14 +7,14 @@ keywords = ["os"]
 license = "MPL-2.0"
 name = "someboot"
 repository.workspace = true
-version = "0.3.3"
+version = "0.4.0"
 
 [features]
 efi = []
 hv = []
 mmu = []
-percpu-prealloc = []
 thead-mae = []
+tls = []
 uspace = ["mmu"]
 
 [dependencies]
@@ -40,7 +40,6 @@ ranges-ext = { workspace = true }
 rgb = "0.8"
 some-serial.workspace = true
 somehal-macros = { workspace = true }
-spin = { workspace = true }
 tock-registers.workspace = true
 uguid = "2.2.1"
 derive_more.workspace = true
@@ -64,6 +63,9 @@ x86 = "0.52"
 sbi-rt = { workspace = true, features = ["legacy"] }
 
 [build-dependencies]
-prettyplease = "0.2"
-quote = "1.0"
-syn = "2.0"
+prettyplease = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+libc.workspace = true

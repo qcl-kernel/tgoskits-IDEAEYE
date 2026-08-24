@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.32](https://github.com/rcore-os/tgoskits/compare/ax-libc-v0.5.31...ax-libc-v0.5.32) - 2026-08-20
+
+### Other
+
+- *(errors)* introduce domain-owned error boundaries ([#2024](https://github.com/rcore-os/tgoskits/pull/2024))
+- *(sync)* move lock implementation into ax-task ([#1962](https://github.com/rcore-os/tgoskits/pull/1962))
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+## [0.5.31](https://github.com/rcore-os/tgoskits/compare/ax-libc-v0.5.30...ax-libc-v0.5.31) - 2026-08-09
+
+### Added
+
+- *(posix)* implement eventfd and bridge epoll for std async ([#1887](https://github.com/rcore-os/tgoskits/pull/1887))
+
+### Fixed
+
+- *(axvisor)* correct shell filesystem command handling ([#1616](https://github.com/rcore-os/tgoskits/pull/1616))
+
+## [0.5.30](https://github.com/rcore-os/tgoskits/compare/ax-libc-v0.5.29...ax-libc-v0.5.30) - 2026-08-03
+
+### Other
+
+- update Cargo.toml dependencies
+
+## [0.5.29](https://github.com/rcore-os/tgoskits/compare/ax-libc-v0.5.28...ax-libc-v0.5.29) - 2026-07-23
+
+### Other
+
+- *(axbuild)* 将构建与启动能力收敛到显式配置 ([#1620](https://github.com/rcore-os/tgoskits/pull/1620))
+
+## [0.5.28](https://github.com/rcore-os/tgoskits/compare/ax-libc-v0.5.27...ax-libc-v0.5.28) - 2026-07-10
+
+### Other
+
+- updated the following local packages: ax-driver, ax-hal, ax-runtime, ax-posix-api
+
+## [0.5.27](https://github.com/rcore-os/tgoskits/compare/ax-libc-v0.5.26...ax-libc-v0.5.27) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-hal, ax-runtime, ax-driver, ax-posix-api
+
 ## [0.5.26](https://github.com/rcore-os/tgoskits/compare/ax-libc-v0.5.25...ax-libc-v0.5.26) - 2026-07-08
 
 ### Other

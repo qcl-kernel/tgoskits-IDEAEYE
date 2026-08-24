@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.32](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.31...ax-std-v0.5.32) - 2026-08-20
+
+### Fixed
+
+- *(console)* unify sleepable runtime console arbitration ([#2113](https://github.com/rcore-os/tgoskits/pull/2113))
+- *(ax-std)* implement futimens for regular files ([#1950](https://github.com/rcore-os/tgoskits/pull/1950))
+
+### Other
+
+- *(serial)* establish bounded owner-affine UART runtime ([#2076](https://github.com/rcore-os/tgoskits/pull/2076))
+- *(errors)* introduce domain-owned error boundaries ([#2024](https://github.com/rcore-os/tgoskits/pull/2024))
+- *(sync)* move lock implementation into ax-task ([#1962](https://github.com/rcore-os/tgoskits/pull/1962))
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+## [0.5.31](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.30...ax-std-v0.5.31) - 2026-08-09
+
+### Added
+
+- *(axvm)* migrate to real Rust std ([#1910](https://github.com/rcore-os/tgoskits/pull/1910))
+- *(posix)* implement eventfd and bridge epoll for std async ([#1887](https://github.com/rcore-os/tgoskits/pull/1887))
+
+### Other
+
+- *(axvm)* unify guest devices and AArch64 timer ownership ([#1717](https://github.com/rcore-os/tgoskits/pull/1717))
+
+## [0.5.30](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.29...ax-std-v0.5.30) - 2026-08-03
+
+### Fixed
+
+- *(dma-api)* retire legacy axdma release paths ([#1796](https://github.com/rcore-os/tgoskits/pull/1796))
+
+### Other
+
+- *(block)* adopt IRQ-driven multi-queue runtime ([#1768](https://github.com/rcore-os/tgoskits/pull/1768))
+
+## [0.5.29](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.28...ax-std-v0.5.29) - 2026-07-23
+
+### Other
+
+- *(axbuild)* 将构建与启动能力收敛到显式配置 ([#1620](https://github.com/rcore-os/tgoskits/pull/1620))
+
+## [0.5.28](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.27...ax-std-v0.5.28) - 2026-07-10
+
+### Other
+
+- updated the following local packages: ax-driver, ax-hal, ax-runtime, ax-alloc, ax-task, ax-api, ax-posix-api
+
+## [0.5.27](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.26...ax-std-v0.5.27) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-hal, ax-runtime, ax-alloc, ax-driver, ax-task, ax-api, ax-posix-api
+
 ## [0.5.26](https://github.com/rcore-os/tgoskits/compare/ax-std-v0.5.25...ax-std-v0.5.26) - 2026-07-08
 
 ### Other

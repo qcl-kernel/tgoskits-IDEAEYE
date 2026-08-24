@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.12](https://github.com/rcore-os/tgoskits/compare/arm-gic-driver-v0.17.11...arm-gic-driver-v0.17.12) - 2026-08-20
+
+### Fixed
+
+- *(arm-gic-driver)* handle implicit GICv2 uniprocessor targets ([#2007](https://github.com/rcore-os/tgoskits/pull/2007))
+
+## [0.17.11](https://github.com/rcore-os/tgoskits/compare/arm-gic-driver-v0.17.10...arm-gic-driver-v0.17.11) - 2026-08-09
+
+### Added
+
+- *(axvisor)* support ROCK 4D guest boot ([#1880](https://github.com/rcore-os/tgoskits/pull/1880))
+
+### Fixed
+
+- *(arm-gic-driver)* use hardware CPU targets for GICv2 routing ([#1803](https://github.com/rcore-os/tgoskits/pull/1803))
+
+### Other
+
+- *(axvm)* unify guest devices and AArch64 timer ownership ([#1717](https://github.com/rcore-os/tgoskits/pull/1717))
+
+## [0.17.10](https://github.com/rcore-os/tgoskits/compare/arm-gic-driver-v0.17.9...arm-gic-driver-v0.17.10) - 2026-08-03
+
+### Other
+
+- *(block)* adopt IRQ-driven multi-queue runtime ([#1768](https://github.com/rcore-os/tgoskits/pull/1768))
+
+## [0.17.9](https://github.com/rcore-os/tgoskits/compare/arm-gic-driver-v0.17.8...arm-gic-driver-v0.17.9) - 2026-07-10
+
+### Added
+
+- *(msi)* add hierarchical MSI-X irq domains ([#1526](https://github.com/rcore-os/tgoskits/pull/1526))
+
 ## [0.17.8](https://github.com/rcore-os/tgoskits/compare/arm-gic-driver-v0.17.7...arm-gic-driver-v0.17.8) - 2026-07-07
 
 ### Added

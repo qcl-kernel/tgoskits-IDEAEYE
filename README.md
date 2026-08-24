@@ -37,7 +37,7 @@ tgoskits/
 └── docs/                      # Docusaurus documentation site
 ```
 
-For subtree synchronization, component layering, and development conventions, see [repository structure and collaboration](https://rcore-os.cn/tgoskits/docs/contributing/repo) and the [component development guide](https://rcore-os.cn/tgoskits/docs/development/components).
+For subtree synchronization, component layering, and development conventions, see [repository structure and collaboration](https://rcore-os.cn/tgoskits/docs/contributing/repo) and the [architecture overview](https://rcore-os.cn/tgoskits/docs/architecture/overview).
 
 ## 3. Quick Experience
 
@@ -61,7 +61,7 @@ If you do not use the container, prepare at least Rust, basic build tools, and c
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 sudo apt update
-sudo apt install -y cmake make ninja-build pkg-config
+sudo apt install -y cmake make ninja-build pkg-config e2fsprogs fakeroot
 sudo apt install -y qemu-system-arm qemu-system-riscv64 qemu-system-x86
 cargo install cargo-binutils
 ```
@@ -82,8 +82,8 @@ qemu-system-loongarch64 --version
 Then use the unified `cargo xtask` entry point to run the three system paths:
 
 ```bash
-# ArceOS: run Hello World
-cargo xtask arceos qemu --package arceos-helloworld --arch aarch64
+# ArceOS: run the default Hello World
+cargo xtask arceos qemu --arch aarch64
 
 # StarryOS: prepare rootfs before the first run
 cargo xtask starry rootfs --arch aarch64
@@ -93,7 +93,7 @@ cargo xtask starry qemu --arch aarch64
 cargo xtask axvisor qemu --arch aarch64
 ```
 
-If you only want the shortest path to a successful run, start with ArceOS Hello World. For more systems, architecture combinations, and QEMU options, see the [quick start overview](https://rcore-os.cn/tgoskits/docs/quickstart/overview) and [run and QEMU](https://rcore-os.cn/tgoskits/docs/build/run).
+If you only want the shortest path to a successful run, start with the default ArceOS Hello World app. Pass `--package arceos-shell` when you specifically need the interactive Shell. For more systems, architecture combinations, and QEMU options, see the [quick start overview](https://rcore-os.cn/tgoskits/docs/quickstart/overview) and [run and QEMU](https://rcore-os.cn/tgoskits/docs/build/run).
 
 ## 4. Contributing
 

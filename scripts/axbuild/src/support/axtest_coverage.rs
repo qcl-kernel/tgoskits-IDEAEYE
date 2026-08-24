@@ -2,9 +2,11 @@ use std::{
     collections::hash_map::DefaultHasher,
     fs,
     hash::{Hash, Hasher},
+    io,
     path::{Path, PathBuf},
 };
 
+use anyhow::Context;
 use ostool::{build::config::Cargo, run::qemu::QemuConfig};
 
 pub(crate) const AXTEST_COVERAGE_RUSTFLAGS: &[&str] = &[
@@ -26,6 +28,8 @@ pub(crate) fn enabled(cargo: &Cargo) -> bool {
 }
 
 pub(crate) fn prepare_cargo(cargo: &mut Cargo) {
+    // Coverage is enabled only after the caller explicitly selected coverage
+    // mode; do not alter ordinary test builds.
     if !cargo
         .features
         .iter()
@@ -33,7 +37,7 @@ pub(crate) fn prepare_cargo(cargo: &mut Cargo) {
     {
         cargo.features.push(COVERAGE_FEATURE.to_string());
     }
-    crate::build::append_encoded_rustflags(cargo, AXTEST_COVERAGE_RUSTFLAGS);
+    crate::build::append_cargo_rustflags(cargo, AXTEST_COVERAGE_RUSTFLAGS);
 }
 
 #[derive(Debug, Clone)]
@@ -43,12 +47,21 @@ pub(crate) struct AxtestCoveragePaths {
 }
 
 impl AxtestCoveragePaths {
-    pub(crate) fn new(workspace_root: &Path, package: &str, target: &str) -> anyhow::Result<Self> {
+    pub(crate) fn new(
+        workspace_root: &Path,
+        package: &str,
+        test: &str,
+        target: &str,
+    ) -> anyhow::Result<Self> {
         let arch_triple = Path::new(target)
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| sanitize_path_component(target));
-        let profraw_filename = format!("{package}-{arch_triple}.profraw");
+        let profraw_filename = format!(
+            "{}-{}-{arch_triple}.profraw",
+            sanitize_path_component(package),
+            sanitize_path_component(test)
+        );
         let dir = workspace_root.join("coverage");
         fs::create_dir_all(&dir)?;
         let profraw_path = dir.join(profraw_filename);
@@ -75,8 +88,17 @@ fn sanitize_path_component(value: &str) -> String {
         .collect()
 }
 
-pub(crate) fn apply_qemu_monitor(qemu: &mut QemuConfig, paths: &AxtestCoveragePaths) {
+pub(crate) fn apply_qemu_monitor(
+    qemu: &mut QemuConfig,
+    paths: &AxtestCoveragePaths,
+) -> anyhow::Result<()> {
     let _ = fs::remove_file(&paths.monitor_socket);
+    remove_stale_profraw(&paths.profraw_path).with_context(|| {
+        format!(
+            "failed to remove stale coverage profile at {}",
+            paths.profraw_path.display()
+        )
+    })?;
     let monitor = format!("unix:{},server,nowait", paths.monitor_socket.display());
     qemu.args.extend([
         "-monitor".to_string(),
@@ -84,28 +106,34 @@ pub(crate) fn apply_qemu_monitor(qemu: &mut QemuConfig, paths: &AxtestCoveragePa
         "-D".to_string(),
         paths
             .profraw_path
-            .with_file_name("qemu.log")
+            .with_extension("qemu.log")
             .display()
             .to_string(),
     ]);
+    Ok(())
 }
 
-/// Replace the QEMU success regex so that ostool waits for coverage extraction
-/// to complete (signaled by `AXTEST_COVERAGE_DONE`) instead of matching
-/// `AXTEST_SUITE_OK` prematurely.
-pub(crate) fn update_success_regex(qemu: &mut QemuConfig) {
-    for regex in &mut qemu.success_regex {
-        if regex.contains(SUITE_OK_MARKER) {
-            *regex = regex.replace(SUITE_OK_MARKER, COVERAGE_DONE_MARKER);
-        }
+fn remove_stale_profraw(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
     }
-    // If no success regex contained the marker, add one for coverage done.
+}
+
+/// Keep the QEMU success contract tied to a marker emitted by the guest.
+///
+/// `AXTEST_COVERAGE_DONE` is emitted by the host capture thread after `memsave`
+/// completes, so it never appears in QEMU's serial stream and cannot be used by
+/// the QEMU runner as its success regex. Coverage completion is enforced by
+/// [`AxtestCoverageCaptureGuard::finish`] after the guest suite succeeds.
+pub(crate) fn update_success_regex(qemu: &mut QemuConfig) {
     if !qemu
         .success_regex
         .iter()
-        .any(|r| r.contains(COVERAGE_DONE_MARKER))
+        .any(|regex| regex.contains(SUITE_OK_MARKER))
     {
-        qemu.success_regex.push(COVERAGE_DONE_MARKER.to_string());
+        qemu.success_regex.push(SUITE_OK_MARKER.to_string());
     }
 }
 
@@ -124,7 +152,10 @@ mod capture {
     use anyhow::{Context, bail};
     use regex::Regex;
 
-    use super::{AxtestCoveragePaths, COVERAGE_DONE_MARKER, MARKER_PREFIX, SUITE_OK_MARKER};
+    use super::{
+        AxtestCoveragePaths, COVERAGE_DONE_MARKER, MARKER_PREFIX, SUITE_OK_MARKER,
+        remove_stale_profraw,
+    };
 
     pub(crate) struct AxtestCoverageCaptureGuard {
         saved_stdout: i32,
@@ -204,6 +235,17 @@ mod capture {
                         Ok(0) => break,
                         Ok(n) => {
                             let chunk = String::from_utf8_lossy(&buf[..n]);
+                            if let Ok(mut state) = reader_state.lock() {
+                                state.push_bytes(&buf[..n]);
+                                // If coverage was just extracted, signal completion
+                                // to ostool so it can stop waiting.
+                                if state.dumped && !state.completion_signaled {
+                                    state.completion_signaled = true;
+                                    let marker = format!("{COVERAGE_DONE_MARKER}\n");
+                                    terminal.write_all(marker.as_bytes())?;
+                                }
+                            }
+
                             tee_buf.push_str(&chunk);
                             // Flush complete lines to terminal, filtering out
                             // AXTEST_SUITE_OK so ostool doesn't kill QEMU before
@@ -214,16 +256,6 @@ mod capture {
                                     terminal.write_all(line.as_bytes())?;
                                 }
                                 tee_buf.drain(..=newline);
-                            }
-                            if let Ok(mut state) = reader_state.lock() {
-                                state.push_bytes(&buf[..n]);
-                                // If coverage was just extracted, signal completion
-                                // to ostool so it can stop waiting.
-                                if state.dumped && !state.completion_signaled {
-                                    state.completion_signaled = true;
-                                    let marker = format!("{COVERAGE_DONE_MARKER}\n");
-                                    terminal.write_all(marker.as_bytes())?;
-                                }
                             }
                         }
                         Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
@@ -332,6 +364,12 @@ mod capture {
                         self.monitor_socket.display()
                     )
                 })?;
+            remove_stale_profraw(&self.profraw_path).with_context(|| {
+                format!(
+                    "failed to remove stale coverage profile at {}",
+                    self.profraw_path.display()
+                )
+            })?;
             let command = format!(
                 "memsave 0x{addr:x} {size} \"{}\"\n",
                 self.profraw_path.display()
@@ -340,8 +378,33 @@ mod capture {
                 .write_all(command.as_bytes())
                 .context("failed to send QEMU memsave command")?;
             stream.flush().ok();
-            Ok(())
+            wait_for_profraw(&self.profraw_path, size)
         }
+    }
+
+    fn wait_for_profraw(path: &Path, size: usize) -> anyhow::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Ok(metadata) = fs::metadata(path) {
+                match metadata.len().cmp(&(size as u64)) {
+                    std::cmp::Ordering::Equal => return Ok(()),
+                    std::cmp::Ordering::Greater => bail!(
+                        "QEMU memsave created coverage profile {} with unexpected size {}; \
+                         expected {}",
+                        path.display(),
+                        metadata.len(),
+                        size
+                    ),
+                    std::cmp::Ordering::Less => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        bail!(
+            "QEMU memsave did not create coverage profile {} with expected size {}",
+            path.display(),
+            size
+        )
     }
 
     fn wait_and_connect_monitor(socket: &Path) -> anyhow::Result<UnixStream> {
@@ -378,6 +441,8 @@ mod capture {
 
     #[cfg(test)]
     mod tests {
+        use std::{io::BufRead, sync::mpsc};
+
         use super::*;
 
         #[test]
@@ -386,6 +451,43 @@ mod capture {
                 parse_coverage_marker("AXTEST_COVERAGE status=ready addr=0x1234abcd size=4096"),
                 Ok((0x1234abcd, 4096))
             );
+        }
+
+        #[test]
+        fn ignores_stale_profraw_before_memsave_completes() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let profraw_path = temp_dir.path().join("coverage.profraw");
+            fs::write(&profraw_path, b"old-profile-data").unwrap();
+
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let (written_tx, written_rx) = mpsc::channel();
+            let writer_path = profraw_path.clone();
+            let writer = std::thread::spawn(move || {
+                let mut command = String::new();
+                let mut reader = io::BufReader::new(&mut server);
+                reader.read_line(&mut command).unwrap();
+                assert!(command.starts_with("memsave 0x1234 4 "));
+                std::thread::sleep(Duration::from_millis(100));
+                fs::write(writer_path, b"new!").unwrap();
+                written_tx.send(()).unwrap();
+            });
+
+            let mut state = AxtestCoverageState {
+                monitor_socket: temp_dir.path().join("monitor.sock"),
+                profraw_path: profraw_path.clone(),
+                line_buf: String::new(),
+                dumped: false,
+                completion_signaled: false,
+                error: None,
+                monitor_conn: Some(client),
+            };
+
+            state.dump_coverage(0x1234, 4).unwrap();
+            let profile_after_dump = fs::read(&profraw_path).unwrap();
+            written_rx.recv().unwrap();
+            writer.join().unwrap();
+
+            assert_eq!(profile_after_dump, b"new!");
         }
     }
 }
@@ -411,3 +513,22 @@ mod capture {
 }
 
 pub(crate) use capture::AxtestCoverageCaptureGuard;
+
+#[cfg(test)]
+mod tests {
+    use ostool::run::qemu::QemuConfig;
+
+    use super::{SUITE_OK_MARKER, update_success_regex};
+
+    #[test]
+    fn coverage_keeps_the_guest_suite_success_contract() {
+        let mut qemu = QemuConfig {
+            success_regex: vec![SUITE_OK_MARKER.to_string()],
+            ..QemuConfig::default()
+        };
+
+        update_success_regex(&mut qemu);
+
+        assert_eq!(qemu.success_regex, [SUITE_OK_MARKER]);
+    }
+}

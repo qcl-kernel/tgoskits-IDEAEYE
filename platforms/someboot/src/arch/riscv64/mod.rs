@@ -2,6 +2,7 @@
 mod _macros;
 
 mod addrspace;
+mod boot;
 mod console;
 mod entry;
 pub(crate) mod irq;
@@ -13,16 +14,16 @@ mod trap;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) use entry::_secondary_entry;
-use page_table_generic::{MemAttributes, PageTableEntry, PhysAddr, PteConfig, TableMeta, VirtAddr};
+use page_table_generic::{PageTableEntry, PhysAddr, TableMeta, VirtAddr};
 pub use relocate::apply as relocate;
 
 use crate::{
-    ArchTrait, DCacheOp,
-    mem::{PageTableInfo, mmu},
+    ArchTrait, DCacheOp, SystimerArch,
+    mem::{MemAttributes, PageTableInfo, PteConfig, mmu},
     power::CpuOnError,
 };
 #[cfg(any(uspace, hv))]
-use crate::{mem::__kimage_va_to_pa, smp::percpu_va_range};
+use crate::{mem::__kimage_va_to_pa, smp::cpu_area_virtual_region};
 
 const SATP_MODE_SV39: usize = 8usize << 60;
 const SSTATUS_SIE: usize = 1 << 1;
@@ -94,71 +95,77 @@ fn thead_mae_mem_attr(_bits: usize) -> MemAttributes {
 pub struct Entry(usize);
 
 impl PageTableEntry for Entry {
-    fn from_config(config: PteConfig) -> Self {
-        if !config.valid {
-            return Self(0);
-        }
+    type PteConfig = PteConfig;
 
+    fn new_page(paddr: PhysAddr, config: Self::PteConfig, _is_huge: bool) -> Self {
         let mut bits = PTE_V;
-        let is_leaf = !config.is_dir || config.huge;
-        if is_leaf {
-            if config.read {
-                bits |= PTE_R;
-            }
-            if config.writable {
-                bits |= PTE_W;
-            }
-            if config.executable {
-                bits |= PTE_X;
-            }
-            if config.lower {
-                bits |= PTE_U;
-            }
-            if config.global {
-                bits |= PTE_G;
-            }
-            if config.valid {
-                bits |= PTE_A;
-            }
-            if config.writable || config.dirty {
-                bits |= PTE_D;
-            }
-            bits |= thead_mae_pte_bits(config.mem_attr);
+        if config.read {
+            bits |= PTE_R;
         }
+        if config.writable {
+            bits |= PTE_W;
+        }
+        if config.executable {
+            bits |= PTE_X;
+        }
+        if config.lower {
+            bits |= PTE_U;
+        }
+        if config.global {
+            bits |= PTE_G;
+        }
+        bits |= PTE_A;
+        if config.writable || config.dirty {
+            bits |= PTE_D;
+        }
+        bits |= thead_mae_pte_bits(config.mem_attr);
 
-        bits |= ((config.paddr.raw() >> 12) & PTE_PPN_MASK) << SV39_PPN_SHIFT;
+        bits |= ((paddr.as_usize() >> 12) & PTE_PPN_MASK) << SV39_PPN_SHIFT;
         Self(bits)
     }
 
-    fn to_config(&self, is_dir: bool) -> PteConfig {
+    fn new_table(paddr: PhysAddr) -> Self {
+        let bits = PTE_V | ((paddr.as_usize() >> 12) & PTE_PPN_MASK) << SV39_PPN_SHIFT;
+        Self(bits)
+    }
+
+    fn paddr(&self, _is_dir: bool) -> PhysAddr {
+        PhysAddr::from_usize(((self.0 >> SV39_PPN_SHIFT) & PTE_PPN_MASK) << 12)
+    }
+
+    fn config(&self, _is_dir: bool) -> Self::PteConfig {
         let bits = self.0;
-        let valid = (bits & PTE_V) != 0;
         let read = (bits & PTE_R) != 0;
         let writable = (bits & PTE_W) != 0;
         let executable = (bits & PTE_X) != 0;
         let lower = (bits & PTE_U) != 0;
         let global = (bits & PTE_G) != 0;
         let dirty = (bits & PTE_D) != 0;
-        let huge = is_dir && (read || writable || executable);
-        let paddr = PhysAddr::new(((bits >> SV39_PPN_SHIFT) & PTE_PPN_MASK) << 12);
-
         PteConfig {
-            paddr,
-            valid,
             read,
             writable,
             executable,
             lower,
             dirty,
             global,
-            is_dir,
-            huge,
             mem_attr: thead_mae_mem_attr(bits),
         }
     }
 
-    fn valid(&self) -> bool {
+    fn present(&self) -> bool {
         (self.0 & PTE_V) != 0
+    }
+
+    fn huge(&self, is_dir: bool) -> bool {
+        is_dir && (self.0 & (PTE_R | PTE_W | PTE_X)) != 0
+    }
+
+    fn unused(&self) -> bool {
+        self.0 == 0
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
     }
 }
 
@@ -189,16 +196,12 @@ impl ArchTrait for Arch {
         (paddr + addrspace::PAGE_OFFSET) as *mut u8
     }
 
-    fn _percpu(paddr: usize) -> *mut u8 {
+    fn cpu_area_phys_to_virt(paddr: usize) -> *mut u8 {
         (paddr + addrspace::PERCPU_BASE) as *mut u8
     }
 
     fn cpu_current_hartid() -> usize {
-        let hart_id: usize;
-        unsafe {
-            core::arch::asm!("mv {hart_id}, tp", hart_id = out(reg) hart_id, options(nostack, preserves_flags));
-        }
-        hart_id
+        boot::current().hart_id()
     }
 
     fn jump_to(entry: usize, sp: usize) -> ! {
@@ -228,7 +231,7 @@ impl ArchTrait for Arch {
         #[cfg(any(uspace, hv))]
         {
             if mmu::is_kernel_relocated() {
-                if percpu_va_range().contains(&vaddr) {
+                if cpu_area_virtual_region().contains(&vaddr) {
                     return vaddr - addrspace::PERCPU_BASE;
                 }
                 if vaddr >= crate::consts::VM_LOAD_ADDRESS {
@@ -298,7 +301,7 @@ impl ArchTrait for Arch {
         _secondary_entry as *const ()
     }
 
-    fn cpu_on(hartid: usize, entry: usize, arg: usize) -> Result<(), CpuOnError> {
+    fn kick_secondary_cpu(hartid: usize, entry: usize, arg: usize) -> Result<(), CpuOnError> {
         match sbi::hart_start(hartid, entry, arg) {
             Ok(()) => Ok(()),
             Err(sbi::HartStartError::AlreadyAvailable | sbi::HartStartError::AlreadyStarted) => {
@@ -312,6 +315,79 @@ impl ArchTrait for Arch {
                 "hart_start failed: {err:?}"
             ))),
         }
+    }
+
+    fn systimer_freq() -> usize {
+        let cached = TIMEBASE_FREQ.load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+
+        let freq = sbi::detect_timebase_frequency().unwrap_or(10_000_000);
+        TIMEBASE_FREQ.store(freq, Ordering::Relaxed);
+        freq
+    }
+
+    fn systimer_tick() -> usize {
+        let ticks: usize;
+        unsafe {
+            core::arch::asm!("csrr {ticks}, time", ticks = out(reg) ticks, options(nostack, preserves_flags));
+        }
+        ticks
+    }
+
+    fn systimer_stability() -> crate::timer::CounterStability {
+        // The time CSR is a hart-local view of the platform-wide real-time
+        // counter advertised by the firmware timebase.
+        crate::timer::CounterStability::Stable
+    }
+
+    fn irq_all_is_enabled() -> bool {
+        let sstatus: usize;
+        unsafe {
+            core::arch::asm!(
+                "csrr {sstatus}, sstatus",
+                sstatus = out(reg) sstatus,
+                options(nostack, preserves_flags)
+            );
+        }
+        (sstatus & SSTATUS_SIE) != 0
+    }
+
+    fn irq_all_set_enable(enable: bool) {
+        unsafe {
+            if enable {
+                core::arch::asm!(
+                    "csrs sstatus, {mask}",
+                    mask = in(reg) SSTATUS_SIE,
+                    options(nostack, preserves_flags)
+                );
+            } else {
+                core::arch::asm!(
+                    "csrc sstatus, {mask}",
+                    mask = in(reg) SSTATUS_SIE,
+                    options(nostack, preserves_flags)
+                );
+            }
+        }
+    }
+
+    fn dcache_range(op: DCacheOp, addr: usize, size: usize) {
+        #[cfg(feature = "thead-mae")]
+        {
+            thead_dcache_range(op, addr, size);
+        }
+        #[cfg(not(feature = "thead-mae"))]
+        {
+            let _ = (op, addr, size);
+            riscv_dma_fence();
+        }
+    }
+}
+
+impl SystimerArch for Arch {
+    fn systimer_irq_id() -> crate::irq::IrqId {
+        irq::systimer_irq()
     }
 
     fn systimer_enable() {
@@ -350,87 +426,78 @@ impl ArchTrait for Arch {
 
     fn systimer_set_interval(ticks: usize) {
         let now = Self::systimer_tick() as u64;
-        let next = if ticks == usize::MAX {
-            u64::MAX
-        } else {
-            now.saturating_add(ticks as u64).max(now + 1)
-        };
+        let next = crate::timer::riscv64_interval::absolute_deadline(now, ticks as u64);
         let _ = sbi::set_timer(next);
     }
+}
 
-    fn systimer_ack() {}
+#[cfg(feature = "thead-mae")]
+const THEAD_DMA_CACHE_LINE_SIZE: usize = 64;
 
-    fn systimer_freq() -> usize {
-        let cached = TIMEBASE_FREQ.load(Ordering::Relaxed);
-        if cached != 0 {
-            return cached;
+#[cfg(feature = "thead-mae")]
+#[derive(Clone, Copy)]
+enum TheadDCacheOp {
+    Clean,
+    CleanInvalidate,
+}
+
+#[cfg(feature = "thead-mae")]
+fn thead_dcache_range(op: DCacheOp, vaddr: usize, size: usize) {
+    let paddr = Arch::virt_to_phys(vaddr as *const u8);
+    match op {
+        DCacheOp::Clean => {
+            riscv_dma_fence();
+            thead_dcache_range_inner(paddr, size, TheadDCacheOp::Clean);
         }
-
-        let freq = sbi::detect_timebase_frequency().unwrap_or(10_000_000);
-        TIMEBASE_FREQ.store(freq, Ordering::Relaxed);
-        freq
-    }
-
-    fn systimer_tick() -> usize {
-        let ticks: usize;
-        unsafe {
-            core::arch::asm!("csrr {ticks}, time", ticks = out(reg) ticks, options(nostack, preserves_flags));
+        DCacheOp::Invalidate => {
+            thead_dcache_range_inner(paddr, size, TheadDCacheOp::CleanInvalidate);
+            riscv_dma_fence();
         }
-        ticks
-    }
-
-    fn irq_all_is_enabled() -> bool {
-        let sstatus: usize;
-        unsafe {
-            core::arch::asm!(
-                "csrr {sstatus}, sstatus",
-                sstatus = out(reg) sstatus,
-                options(nostack, preserves_flags)
-            );
-        }
-        (sstatus & SSTATUS_SIE) != 0
-    }
-
-    fn irq_all_set_enable(enable: bool) {
-        unsafe {
-            if enable {
-                core::arch::asm!(
-                    "csrs sstatus, {mask}",
-                    mask = in(reg) SSTATUS_SIE,
-                    options(nostack, preserves_flags)
-                );
-            } else {
-                core::arch::asm!(
-                    "csrc sstatus, {mask}",
-                    mask = in(reg) SSTATUS_SIE,
-                    options(nostack, preserves_flags)
-                );
-            }
+        DCacheOp::CleanInvalidate => {
+            riscv_dma_fence();
+            thead_dcache_range_inner(paddr, size, TheadDCacheOp::CleanInvalidate);
+            riscv_dma_fence();
         }
     }
+}
 
-    fn irq_is_enabled(irq: crate::irq::IrqId) -> bool {
-        irq == irq::systimer_irq() && Self::systimer_irq_is_enabled()
-    }
+#[cfg(feature = "thead-mae")]
+fn thead_dcache_range_inner(paddr: usize, size: usize, op: TheadDCacheOp) {
+    let Some((mut line, end)) =
+        crate::mem::cache_line_range(paddr, size, THEAD_DMA_CACHE_LINE_SIZE)
+    else {
+        return;
+    };
 
-    fn irq_set_enable(irq: crate::irq::IrqId, enable: bool) {
-        if irq == irq::systimer_irq() {
-            if enable {
-                Self::systimer_irq_enable();
-            } else {
-                Self::systimer_irq_disable();
-            }
+    while line < end {
+        match op {
+            TheadDCacheOp::Clean => unsafe {
+                // T-Head dcache.cpa a0: clean by physical address.
+                core::arch::asm!(".long 0x0295000b", in("a0") line, options(nostack));
+            },
+            TheadDCacheOp::CleanInvalidate => unsafe {
+                // T-Head dcache.cipa a0: clean and invalidate by physical address.
+                core::arch::asm!(".long 0x02b5000b", in("a0") line, options(nostack));
+            },
         }
+        let Some(next) = line.checked_add(THEAD_DMA_CACHE_LINE_SIZE) else {
+            break;
+        };
+        line = next;
     }
+    thead_sync_is();
+}
 
-    fn dcache_range(_op: DCacheOp, _addr: usize, _size: usize) {
-        unsafe {
-            core::arch::asm!("fence rw, rw", options(nostack, preserves_flags));
-        }
+fn riscv_dma_fence() {
+    unsafe {
+        core::arch::asm!("fence rw, rw", options(nostack, preserves_flags));
     }
+}
 
-    unsafe fn efi_enter_kernel(_system_table: *const ::core::ffi::c_void) -> bool {
-        false
+#[cfg(feature = "thead-mae")]
+fn thead_sync_is() {
+    unsafe {
+        core::arch::asm!(".long 0x01b0000b", options(nostack));
     }
 }
 

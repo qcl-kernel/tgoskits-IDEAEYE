@@ -1,5 +1,7 @@
-use page_table_generic::{MemAttributes, PageTableEntry, TableMeta};
+use page_table_generic::{PageTableEntry, TableMeta};
 use tock_registers::{interfaces::*, register_bitfields, registers::ReadWrite};
+
+use crate::mem::{MemAttributes, PteConfig};
 
 register_bitfields![u64,
     /// 4k 48-bit
@@ -12,9 +14,9 @@ register_bitfields![u64,
         AP_RO OFFSET(7) NUMBITS(1) [],
         SHAREABLE OFFSET(8) NUMBITS(2) [
             NON = 0b00,
-            INNER = 0b01,
+            RESERVED = 0b01,
             OUTER = 0b10,
-            RESERVED = 0b11
+            INNER = 0b11
         ],
         AF OFFSET(10) NUMBITS(1) [],
         NG OFFSET(11) NUMBITS(1) [],
@@ -46,22 +48,24 @@ impl Entry {
 }
 
 impl PageTableEntry for Entry {
-    fn from_config(config: page_table_generic::PteConfig) -> Self {
-        let entry = Entry::empty();
-        if !config.valid {
-            return entry;
-        }
+    type PteConfig = PteConfig;
 
+    fn new_page(
+        paddr: page_table_generic::PhysAddr,
+        config: Self::PteConfig,
+        is_huge: bool,
+    ) -> Self {
+        let entry = Entry::empty();
         let mut val = PTE::VALID::SET;
 
         if config.read {
             val += PTE::AF::SET;
         }
 
-        val += PTE::PHYS_ADDR.val((config.paddr.raw() as u64) >> 12);
+        val += PTE::PHYS_ADDR.val((paddr.as_usize() as u64) >> 12);
 
         // 设置大页标志（NON_BLOCK=0 表示大页）
-        if !config.huge {
+        if !is_huge {
             val += PTE::NON_BLOCK::SET;
         }
 
@@ -109,12 +113,12 @@ impl PageTableEntry for Entry {
                 val += PTE::MAIR.val(0) + PTE::SHAREABLE::OUTER;
             }
             MemAttributes::Normal | MemAttributes::PerCpu => {
-                val += PTE::MAIR.val(1);
-                if matches!(config.mem_attr, MemAttributes::PerCpu) {
-                    val += PTE::SHAREABLE::NON;
-                } else {
-                    val += PTE::SHAREABLE::OUTER;
-                }
+                // CPU-local areas have a second virtual alias, but they remain
+                // ordinary coherent RAM: remote wake, migration, allocator,
+                // and diagnostic paths access another CPU's area directly.
+                // Both aliases therefore need the exact same cacheability and
+                // shareability attributes.
+                val += PTE::MAIR.val(1) + PTE::SHAREABLE::INNER;
             }
             MemAttributes::Uncached => {
                 val += PTE::MAIR.val(2) + PTE::SHAREABLE::OUTER;
@@ -124,7 +128,21 @@ impl PageTableEntry for Entry {
         entry
     }
 
-    fn to_config(&self, is_dir: bool) -> page_table_generic::PteConfig {
+    fn new_table(paddr: page_table_generic::PhysAddr) -> Self {
+        let entry = Entry::empty();
+        entry.as_typed().write(
+            PTE::VALID::SET
+                + PTE::NON_BLOCK::SET
+                + PTE::PHYS_ADDR.val((paddr.as_usize() as u64) >> 12),
+        );
+        entry
+    }
+
+    fn paddr(&self, _is_dir: bool) -> page_table_generic::PhysAddr {
+        ((self.as_typed().read(PTE::PHYS_ADDR) << 12) as usize).into()
+    }
+
+    fn config(&self, _is_dir: bool) -> Self::PteConfig {
         let pte = self.as_typed();
         let lower;
         let executable;
@@ -143,45 +161,45 @@ impl PageTableEntry for Entry {
             executable = !pte.is_set(PTE::PXN);
         }
 
-        page_table_generic::PteConfig {
-            paddr: ((pte.read(PTE::PHYS_ADDR) << 12) as usize).into(),
-            valid: pte.is_set(PTE::VALID),
+        PteConfig {
             read: pte.is_set(PTE::AF),
             writable: pte.is_set(PTE::AP_RO),
             executable,
             lower,
             dirty: pte.is_set(PTE::AF),
             global: !pte.is_set(PTE::NG),
-            is_dir,
-            huge: !pte.is_set(PTE::NON_BLOCK),
             mem_attr: {
-                let mut attr = match pte.read(PTE::MAIR) {
+                match pte.read(PTE::MAIR) {
                     0 => MemAttributes::Device,
                     1 => MemAttributes::Normal,
                     2 => MemAttributes::Uncached,
                     _ => MemAttributes::Normal,
-                };
-
-                match pte.read_as_enum(PTE::SHAREABLE) {
-                    Some(PTE::SHAREABLE::Value::OUTER) => {}
-                    _ => attr = MemAttributes::PerCpu,
                 }
-
-                attr
             },
         }
     }
 
-    fn valid(&self) -> bool {
+    fn present(&self) -> bool {
         self.as_typed().is_set(PTE::VALID)
+    }
+
+    fn huge(&self, is_dir: bool) -> bool {
+        is_dir && !self.as_typed().is_set(PTE::NON_BLOCK)
+    }
+
+    fn unused(&self) -> bool {
+        self.0 == 0
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
     }
 }
 
 impl core::fmt::Debug for Entry {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // Debug 输出默认使用页表项格式（is_dir=false）
-        let config = self.to_config(false);
-        write!(f, "PTE {:?}", config.paddr)
+        write!(f, "PTE {:?}", PageTableEntry::paddr(self, false))
     }
 }
 

@@ -15,12 +15,14 @@ use super::{Starry, board};
 pub type StarryBuildInfo = crate::build::BuildInfo;
 pub use crate::build::LogLevel;
 use crate::{
+    build::BareKernelLinkMode,
     context::{ResolvedStarryRequest, STARRY_PACKAGE, starry_arch_for_target_checked},
     support::process::ProcessExt,
 };
 
-pub(crate) fn default_starry_build_info_for_target(target: &str) -> StarryBuildInfo {
-    let _ = target;
+pub(crate) fn default_starry_build_info() -> StarryBuildInfo {
+    // The package and board configuration own feature selection; a generated
+    // default must remain an empty capability set.
     StarryBuildInfo {
         features: Vec::new(),
         ..StarryBuildInfo::default()
@@ -73,9 +75,7 @@ pub(crate) fn load_build_info(request: &ResolvedStarryRequest) -> anyhow::Result
     let mut build_info = if let Some(build_info) = &request.build_info_override {
         build_info.clone()
     } else {
-        crate::build::ensure_build_info(&request.build_info_path, || {
-            default_starry_build_info_for_target(&request.target)
-        })?;
+        crate::build::ensure_build_info(&request.build_info_path, default_starry_build_info)?;
         crate::build::load_toml_with_rejector(
             &request.build_info_path,
             "build info",
@@ -83,7 +83,7 @@ pub(crate) fn load_build_info(request: &ResolvedStarryRequest) -> anyhow::Result
         )?
     };
 
-    crate::build::apply_makefile_features(&mut build_info, &request.package, &makefile_features);
+    crate::build::apply_makefile_features(&mut build_info, &makefile_features)?;
 
     if let Some(smp) = request.smp {
         build_info.max_cpu_num = Some(smp);
@@ -99,40 +99,34 @@ pub(crate) fn load_cargo_config(request: &ResolvedStarryRequest) -> anyhow::Resu
     let mut build_info = if let Some(build_info) = &request.build_info_override {
         build_info.clone()
     } else {
-        crate::build::ensure_build_info(&request.build_info_path, || {
-            default_starry_build_info_for_target(&request.target)
-        })?;
+        crate::build::ensure_build_info(&request.build_info_path, default_starry_build_info)?;
         crate::build::load_toml_with_rejector(
             &request.build_info_path,
             "build info",
             crate::build::reject_arceos_app_c_field,
         )?
     };
-    crate::build::apply_makefile_features_with_metadata(
-        &mut build_info,
-        &request.package,
-        &makefile_features,
-        metadata,
-    );
-    normalize_starry_platform_features(&mut build_info.features);
+    crate::build::apply_makefile_features(&mut build_info, &makefile_features)?;
+    enable_starry_smp_capability(&mut build_info.features);
+    build_info.features.sort();
+    build_info.features.dedup();
     if let Some(smp) = request.smp {
         build_info.max_cpu_num = Some(smp);
     }
-    let mut cargo = build_info.into_prepared_base_cargo_config_with_metadata(
+    let mut cargo = build_info.into_prepared_no_std_cargo_config_with_metadata(
         &request.package,
         &request.target,
         metadata,
+        BareKernelLinkMode::Pie,
     )?;
-    cargo
-        .features
-        .retain(|feature| !is_removed_dynamic_platform_feature(feature));
     patch_starry_cargo_config(&mut cargo, request, metadata)?;
     Ok(cargo)
 }
 
-fn normalize_starry_platform_features(features: &mut Vec<String>) {
-    features.sort();
-    features.dedup();
+fn enable_starry_smp_capability(features: &mut Vec<String>) {
+    // Starry always compiles the SMP kernel paths. `SMP` limits the CPUs exposed
+    // at runtime; board configurations may intentionally leave that limit unset.
+    features.push("smp".to_string());
 }
 
 fn patch_starry_cargo_config(
@@ -143,10 +137,6 @@ fn patch_starry_cargo_config(
     cargo.package = request.package.clone();
     ensure_starry_bin_arg(&mut cargo.args, &request.package, metadata)?;
     apply_starry_bin_override(cargo)?;
-    cargo
-        .features
-        .retain(|feature| !is_removed_dynamic_platform_feature(feature));
-
     cargo
         .env
         .insert("AX_ARCH".to_string(), request.arch.clone());
@@ -194,6 +184,8 @@ pub(crate) fn postprocess_starry_artifact(
     ) {
         generate_uimage_from_its(workspace_root, &plan, &request.arch, &request.target, elf)?;
     }
+
+    validate_riscv_image_artifact(&request.arch, elf)?;
 
     Ok(())
 }
@@ -322,6 +314,67 @@ fn refresh_bin_if_present(kernel_elf: &Path) -> anyhow::Result<()> {
         .exec()
         .with_context(|| format!("failed to refresh {}", bin.display()))?;
     stage.done();
+    Ok(())
+}
+
+fn validate_riscv_image_artifact(arch: &str, kernel_elf: &Path) -> anyhow::Result<()> {
+    if arch != "riscv64" {
+        return Ok(());
+    }
+    let bin = kernel_elf.with_extension("bin");
+    if !bin.exists() {
+        bail!("RISC-V Image artifact is missing: {}", bin.display());
+    }
+    let image = fs::read(&bin).with_context(|| format!("failed to read {}", bin.display()))?;
+    validate_riscv_image_header(&image)
+        .with_context(|| format!("invalid RISC-V Image header in {}", bin.display()))?;
+    println!("[axbuild] validated RISC-V Image header: {}", bin.display());
+    Ok(())
+}
+
+fn validate_riscv_image_header(image: &[u8]) -> anyhow::Result<()> {
+    const HEADER_SIZE: usize = 0x40;
+    const TEXT_OFFSET: u64 = 0x20_0000;
+    const AUIPC_T0_FIXED_BITS: u32 = 0x297;
+    const JALR_ZERO_T0_FIXED_BITS: u32 = 0x0002_8067;
+
+    if image.len() < HEADER_SIZE {
+        bail!(
+            "image is only {} bytes, need at least {HEADER_SIZE}",
+            image.len()
+        );
+    }
+
+    let code0 = u32::from_le_bytes(image[0..4].try_into().unwrap());
+    let code1 = u32::from_le_bytes(image[4..8].try_into().unwrap());
+    if code0 & 0x0fff != AUIPC_T0_FIXED_BITS {
+        bail!("code0 is not `auipc t0, ...`: {code0:#010x}");
+    }
+    if code1 & 0x000f_ffff != JALR_ZERO_T0_FIXED_BITS {
+        bail!("code1 is not `jalr zero, ...(t0)`: {code1:#010x}");
+    }
+
+    let read_u64 =
+        |offset: usize| u64::from_le_bytes(image[offset..offset + 8].try_into().unwrap());
+    if read_u64(0x08) != TEXT_OFFSET {
+        bail!(
+            "text_offset at 0x08 is {:#x}, expected {TEXT_OFFSET:#x}",
+            read_u64(0x08)
+        );
+    }
+    let image_size = read_u64(0x10);
+    if image_size != image.len() as u64 {
+        bail!(
+            "image_size at 0x10 is {image_size:#x}, but the artifact is {} bytes",
+            image.len()
+        );
+    }
+    if &image[0x30..0x35] != b"RISCV" {
+        bail!("RISC-V magic at 0x30 is missing");
+    }
+    if &image[0x38..0x3c] != b"RSC\x05" {
+        bail!("RISC-V magic2 at 0x38 is missing");
+    }
     Ok(())
 }
 
@@ -551,13 +604,6 @@ fn temp_file_path(path: &Path, suffix: &str) -> anyhow::Result<PathBuf> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("invalid path filename: {}", path.display()))?;
     Ok(parent.join(format!(".{name}.{suffix}.{}.tmp", std::process::id())))
-}
-
-fn is_removed_dynamic_platform_feature(feature: &str) -> bool {
-    matches!(
-        feature,
-        "plat-dyn" | "ax-std/plat-dyn" | "starry-kernel/plat-dyn" | "ax-hal/plat-dyn"
-    )
 }
 
 fn apply_starry_bin_override(cargo: &mut Cargo) -> anyhow::Result<()> {

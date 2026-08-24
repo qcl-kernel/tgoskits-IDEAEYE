@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.8](https://github.com/rcore-os/tgoskits/compare/ax-net-v0.12.7...ax-net-v0.12.8) - 2026-08-20
+
+### Added
+
+- *(starry)* add reproducible iperf3 board benchmark ([#1948](https://github.com/rcore-os/tgoskits/pull/1948))
+
+### Fixed
+
+- *(starry-kernel)* unify PID namespace identity ownership ([#2023](https://github.com/rcore-os/tgoskits/pull/2023))
+- *(ax-net)* avoid sleeping mutex under datagram spin lock ([#1963](https://github.com/rcore-os/tgoskits/pull/1963))
+- *(starry-kernel)* support IPv4 ping syscall paths ([#1896](https://github.com/rcore-os/tgoskits/pull/1896))
+
+### Other
+
+- *(axtest)* standardize Cargo and QEMU test flow ([#2088](https://github.com/rcore-os/tgoskits/pull/2088))
+- *(errors)* introduce domain-owned error boundaries ([#2024](https://github.com/rcore-os/tgoskits/pull/2024))
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+## [0.12.7](https://github.com/rcore-os/tgoskits/compare/ax-net-v0.12.6...ax-net-v0.12.7) - 2026-08-09
+
+### Fixed
+
+- *(ax-net)* complete Unix socket introspection and credentials ([#1905](https://github.com/rcore-os/tgoskits/pull/1905))
+
+## [0.12.6](https://github.com/rcore-os/tgoskits/compare/ax-net-v0.12.5...ax-net-v0.12.6) - 2026-08-03
+
+### Added
+
+- *(kernel)* browser-prerequisite syscall support and tests, aligned to Linux ([#1569](https://github.com/rcore-os/tgoskits/pull/1569))
+- *(starry-nix)* activate nixpkgs on StarryOS (with sandboxed nix) ([#1520](https://github.com/rcore-os/tgoskits/pull/1520))
+
+### Other
+
+- enhance axtest coverage for various starry-kernel contracts ([#1674](https://github.com/rcore-os/tgoskits/pull/1674))
+
+## [0.12.5](https://github.com/rcore-os/tgoskits/compare/ax-net-v0.12.4...ax-net-v0.12.5) - 2026-07-23
+
+### Added
+
+- *(starry)* /proc/net/dev stats implement ([#1645](https://github.com/rcore-os/tgoskits/pull/1645))
+- *(starry,ax-net)* return L2 frame length from Device send/recv for net_stats byte counters ([#1571](https://github.com/rcore-os/tgoskits/pull/1571))
+
+### Fixed
+
+- *(starry)* correct /proc/pid/comm padding and non-blocking partial TCP send ([#1558](https://github.com/rcore-os/tgoskits/pull/1558))
+- *(ax-net)* publish socket write shutdown to peers ([#1639](https://github.com/rcore-os/tgoskits/pull/1639))
+
+### Other
+
+- support IP_MTU_DISCOVER and flush UDP egress before close ([#1568](https://github.com/rcore-os/tgoskits/pull/1568))
+- *(ci)* update Rust nightly to 2026-07-15 ([#1626](https://github.com/rcore-os/tgoskits/pull/1626))
+
+## [0.12.4](https://github.com/rcore-os/tgoskits/compare/ax-net-v0.12.3...ax-net-v0.12.4) - 2026-07-10
+
+### Other
+
+- updated the following local packages: ax-hal, ax-hal, ax-task, ax-task, ax-sync
+
+## [0.12.3](https://github.com/rcore-os/tgoskits/compare/ax-net-v0.12.2...ax-net-v0.12.3) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-hal, ax-hal, ax-task, ax-task, ax-sync
+
 ## [0.12.2](https://github.com/rcore-os/tgoskits/compare/ax-net-v0.12.1...ax-net-v0.12.2) - 2026-07-08
 
 ### Other

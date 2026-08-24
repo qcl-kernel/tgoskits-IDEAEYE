@@ -5,11 +5,10 @@ const routes = {
   quickstart: '/docs/quickstart/overview',
   architecture: '/docs/architecture/overview',
   build: '/docs/build/overview',
-  components: '/docs/components',
-  arceos: '/docs/development/arceos',
-  starryos: '/docs/development/starryos',
-  axvisor: '/docs/development/axvisor',
-  componentGraph: '/docs/development/components',
+  guideline: '/guideline/code-quality',
+  arceos: '/docs/quickstart/arceos',
+  starryos: '/docs/quickstart/starryos',
+  axvisor: '/docs/quickstart/axvisor',
   blog: '/blog',
   community: '/community/introduction',
   github: 'https://github.com/rcore-os/tgoskits',
@@ -20,7 +19,7 @@ const config = {
   title: 'TGOSKits',
   tagline: '面向操作系统与虚拟化开发的统一集成工作区 —— ArceOS · StarryOS · Axvisor',
   favicon: 'images/site/favicon.ico',
-  url: 'https://rcore-os.github.io',
+  url: 'https://rcore-os.cn',
   baseUrl: '/tgoskits/',
   trailingSlash: false,
   organizationName: 'rcore-os',
@@ -43,6 +42,18 @@ const config = {
         routeBasePath: 'community',
         sidebarPath: './sidebars.community.js',
         editUrl: 'https://github.com/rcore-os/tgoskits/tree/main/docs/community',
+        showLastUpdateAuthor: true,
+        showLastUpdateTime: true,
+      },
+    ],
+    [
+      '@docusaurus/plugin-content-docs',
+      {
+        id: 'guideline',
+        path: 'guideline',
+        routeBasePath: 'guideline',
+        sidebarPath: './sidebars.guideline.js',
+        editUrl: 'https://github.com/rcore-os/tgoskits/tree/main/docs/guideline',
         showLastUpdateAuthor: true,
         showLastUpdateTime: true,
       },
@@ -88,6 +99,14 @@ const config = {
     ],
   ],
   themeConfig: {
+    algolia: {
+      appId: 'HETXPBD08D',
+      apiKey: '12cfa7e19141075aac2d0644cfda70c4',
+      // Set this after the first crawler run creates the index.
+      indexName: 'tgoskits',
+      contextualSearch: true,
+      searchPagePath: 'search',
+    },
     colorMode: {
       defaultMode: 'light',
       disableSwitch: false,
@@ -115,6 +134,12 @@ const config = {
           sidebarId: 'docs',
           position: 'left',
           label: 'Document',
+        },
+        {
+          to: routes.guideline,
+          activeBasePath: 'guideline',
+          position: 'left',
+          label: 'Guideline',
         },
         {
           to: routes.blog,
@@ -145,6 +170,7 @@ const config = {
             {label: '快速开始', to: routes.quickstart},
             {label: '架构设计', to: routes.architecture},
             {label: '构建与运行', to: routes.build},
+            {label: '工程规范', to: routes.guideline},
           ],
         },
         {
@@ -153,7 +179,6 @@ const config = {
             {label: 'ArceOS', to: routes.arceos},
             {label: 'StarryOS', to: routes.starryos},
             {label: 'Axvisor', to: routes.axvisor},
-            {label: '组件库', to: routes.components},
           ],
         },
         {
@@ -161,7 +186,8 @@ const config = {
           items: [
             {label: 'GitHub 仓库', href: routes.github},
             {label: '构建系统', to: routes.build},
-            {label: '组件依赖图', to: routes.componentGraph},
+            {label: '架构设计', to: routes.architecture},
+            {label: '工程规范', to: routes.guideline},
             {label: 'Blog', to: routes.blog},
             {label: 'Community', to: routes.community},
           ],

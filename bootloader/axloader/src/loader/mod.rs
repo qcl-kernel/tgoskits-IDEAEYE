@@ -46,7 +46,6 @@ fn fetch_control_offer() -> bool {
                 offer.image_format,
                 offer.kernel_size
             );
-            logln!("kernel_url: {}", offer.kernel_url);
             if let Some(entry_symbol) = offer.entry_symbol.as_deref() {
                 logln!("entry_symbol: {entry_symbol}");
             }
@@ -57,13 +56,22 @@ fn fetch_control_offer() -> bool {
             ) {
                 Ok(elf) => {
                     logln!(
-                        "elf_loaded: load={:#x} end={:#x} pages={} entry={:#x}",
+                        "elf_loaded: load={:#x} end={:#x} pages={} entry={:#x} handoff={:?}",
                         elf.load_addr,
                         elf.load_end,
                         elf.page_count,
-                        elf.entry_point
+                        elf.entry_point,
+                        elf.handoff
                     );
-                    match entry::exit_boot_services_and_jump(elf.entry_point) {
+                    let jump_result = match elf.handoff {
+                        elf_loader::EntryHandoff::BootInfo => {
+                            entry::exit_boot_services_and_jump(elf.entry_point)
+                        }
+                        elf_loader::EntryHandoff::Uefi => {
+                            entry::jump_to_uefi_entry(elf.entry_point)
+                        }
+                    };
+                    match jump_result {
                         Ok(()) => logln!("jump_error: entry returned unexpectedly"),
                         Err(err) => logln!("jump_error: {err:?}"),
                     }

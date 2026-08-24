@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/rcore-os/tgoskits/compare/axvm-v0.5.26...axvm-v0.6.0) - 2026-08-20
+
+### Added
+
+- *(dma-api)* [**breaking**] add device DMA coherency with uncached-alias remap ([#2106](https://github.com/rcore-os/tgoskits/pull/2106))
+- *(axvisor)* axum management HTTP control plane with VM lifecycle API ([#1909](https://github.com/rcore-os/tgoskits/pull/1909))
+- *(starry-nixos)* add Stage-2 NixOS userspace baseline ([#1923](https://github.com/rcore-os/tgoskits/pull/1923))
+- *(axvisor)* Implement inter-VM communication (IVC) demo and protocol enhancements ([#1834](https://github.com/rcore-os/tgoskits/pull/1834))
+- *(axvirtio-blk)* add virtio-mmio block device core ([#1935](https://github.com/rcore-os/tgoskits/pull/1935))
+- *(axvisor)* add dual-guest virtio-net support ([#1927](https://github.com/rcore-os/tgoskits/pull/1927))
+
+### Fixed
+
+- *(console)* unify sleepable runtime console arbitration ([#2113](https://github.com/rcore-os/tgoskits/pull/2113))
+- *(x86_vcpu)* decode generic device MMIO of arbitrary width on NPF/EPT ([#2082](https://github.com/rcore-os/tgoskits/pull/2082))
+- *(riscv-vcpu)* [**breaking**] persist VSEIP while unbound ([#2090](https://github.com/rcore-os/tgoskits/pull/2090))
+- *(axdevice)* [**breaking**] bind device access to the issuing vCPU ([#2092](https://github.com/rcore-os/tgoskits/pull/2092))
+- *(axvm)* preserve LoongArch cascade IRQ ownership ([#2093](https://github.com/rcore-os/tgoskits/pull/2093))
+- *(axvisor)* avoid nested locks in vm show ([#2020](https://github.com/rcore-os/tgoskits/pull/2020))
+- *(axbuild)* lint host-test targets with clippy ([#2022](https://github.com/rcore-os/tgoskits/pull/2022))
+- *(arm-gic-driver)* handle implicit GICv2 uniprocessor targets ([#2007](https://github.com/rcore-os/tgoskits/pull/2007))
+- *(axvm)* preserve console device poll wakeups ([#1977](https://github.com/rcore-os/tgoskits/pull/1977))
+- *(axvm)* prevent dual guest startup and wake races ([#1966](https://github.com/rcore-os/tgoskits/pull/1966))
+- *(aarch64)* restore RK3588 guest cpufreq and SCMI support ([#1919](https://github.com/rcore-os/tgoskits/pull/1919))
+
+### Other
+
+- *(axtest)* standardize Cargo and QEMU test flow ([#2088](https://github.com/rcore-os/tgoskits/pull/2088))
+- *(sync)* move lock implementation into ax-task ([#1962](https://github.com/rcore-os/tgoskits/pull/1962))
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+- *(axvm)* layer RISC-V SBI IPI routing ([#1920](https://github.com/rcore-os/tgoskits/pull/1920))
+- *(axvisor)* validate x86 OVMF ACPI on VMX and SVM ([#1931](https://github.com/rcore-os/tgoskits/pull/1931))
+
+### Fixed
+
+- Preserve somehal ownership of the LoongArch EIOINTC cascade IRQ.
+
+## [0.5.26](https://github.com/rcore-os/tgoskits/compare/axvm-v0.5.25...axvm-v0.5.26) - 2026-08-09
+
+### Added
+
+- *(axvisor)* build VMs from a resolved device graph ([#1718](https://github.com/rcore-os/tgoskits/pull/1718))
+- *(axvm)* migrate to real Rust std ([#1910](https://github.com/rcore-os/tgoskits/pull/1910))
+- *(axvisor)* support ROCK 4D guest boot ([#1880](https://github.com/rcore-os/tgoskits/pull/1880))
+
+### Fixed
+
+- *(axvm)* preserve PSCI in generated guest FDT
+- *(riscv-vcpu)* handle virtual interrupt injection for SMP guests ([#1681](https://github.com/rcore-os/tgoskits/pull/1681))
+- *(axvisor)* correct shell filesystem command handling ([#1616](https://github.com/rcore-os/tgoskits/pull/1616))
+
+### Other
+
+- *(memory)* unify page-table execution on page-table-generic ([#1911](https://github.com/rcore-os/tgoskits/pull/1911))
+- *(ax-ipi)* establish typed IPI publication transport ([#1916](https://github.com/rcore-os/tgoskits/pull/1916))
+- *(axvisor)* clean up host dependencies ([#1861](https://github.com/rcore-os/tgoskits/pull/1861))
+- *(axvisor)* remove NimbOS guest, legacy CI, and standalone scripts ([#1866](https://github.com/rcore-os/tgoskits/pull/1866))
+- *(repo)* unify workspace dependencies ([#1860](https://github.com/rcore-os/tgoskits/pull/1860))
+- *(axvm)* unify guest devices and AArch64 timer ownership ([#1717](https://github.com/rcore-os/tgoskits/pull/1717))
+
+## [0.5.25](https://github.com/rcore-os/tgoskits/compare/axvm-v0.5.24...axvm-v0.5.25) - 2026-08-03
+
+### Added
+
+- *(axvm)* add VmInterruptSender and integrate dispatcher into VmRuntimeHandle ([#1679](https://github.com/rcore-os/tgoskits/pull/1679))
+- *(axvisor)* support StarryOS guest on Orange Pi 5 Plus ([#1684](https://github.com/rcore-os/tgoskits/pull/1684))
+
+### Fixed
+
+- *(axhvc)* handle PSCI_VERSION hypercall ([#1692](https://github.com/rcore-os/tgoskits/pull/1692))
+- *(axvm)* enable host capabilities in tests ([#1791](https://github.com/rcore-os/tgoskits/pull/1791))
+- *(someboot)* establish runtime CPU topology mapping ([#1710](https://github.com/rcore-os/tgoskits/pull/1710))
+
+### Other
+
+- *(axvm)* add authoritative VM lifecycle docs and align crate overview ([#1828](https://github.com/rcore-os/tgoskits/pull/1828))
+- virtualize AArch64 physical timer state ([#1770](https://github.com/rcore-os/tgoskits/pull/1770))
+- *(block)* adopt IRQ-driven multi-queue runtime ([#1768](https://github.com/rcore-os/tgoskits/pull/1768))
+- *(axvisor)* implement unified emulated device framework ([#1722](https://github.com/rcore-os/tgoskits/pull/1722))
+
+## [0.5.24](https://github.com/rcore-os/tgoskits/compare/axvm-v0.5.23...axvm-v0.5.24) - 2026-07-23
+
+### Added
+
+- *(axvm)* add virtual interrupt model types and per-vCPU dispatch queue ([#1661](https://github.com/rcore-os/tgoskits/pull/1661))
+- *(axdevice)* register exclusive IRQ line resources ([#1630](https://github.com/rcore-os/tgoskits/pull/1630))
+- *(axvisor)* Enhance AxLoader and Asus NUC15CRH support with fixes ([#1555](https://github.com/rcore-os/tgoskits/pull/1555))
+
+### Other
+
+- *(cpu-local)* extract per-CPU register ownership ([#1662](https://github.com/rcore-os/tgoskits/pull/1662))
+- *(x86_vcpu)* select VMX/SVM backend at runtime from CPUID, rem… ([#1629](https://github.com/rcore-os/tgoskits/pull/1629))
+- *(ci)* update Rust nightly to 2026-07-15 ([#1626](https://github.com/rcore-os/tgoskits/pull/1626))
+- *(axhvc)* introduce hypercall errors ([#1599](https://github.com/rcore-os/tgoskits/pull/1599))
+- *(axvmconfig)* introduce configuration errors ([#1597](https://github.com/rcore-os/tgoskits/pull/1597))
+- *(axdevice)* replace errno contracts ([#1595](https://github.com/rcore-os/tgoskits/pull/1595))
+- *(axaddrspace)* introduce typed errors ([#1592](https://github.com/rcore-os/tgoskits/pull/1592))
+- *(axvm-types)* introduce backend errors ([#1591](https://github.com/rcore-os/tgoskits/pull/1591))
+- *(axvm)* introduce typed domain errors ([#1590](https://github.com/rcore-os/tgoskits/pull/1590))
+- *(axvm)* consolidate architecture-specific code ([#1562](https://github.com/rcore-os/tgoskits/pull/1562))
+
+## [0.5.23](https://github.com/rcore-os/tgoskits/compare/axvm-v0.5.22...axvm-v0.5.23) - 2026-07-10
+
+### Other
+
+- *(riscv_vcpu)* decouple AxVM adapter and clean exits ([#1556](https://github.com/rcore-os/tgoskits/pull/1556))
+- *(x86_vcpu)* make x86 virtualization OS-neutral ([#1550](https://github.com/rcore-os/tgoskits/pull/1550))
+- *(loongarch_vcpu)* decouple AxVM adapter and typed registers ([#1553](https://github.com/rcore-os/tgoskits/pull/1553))
+
+## [0.5.22](https://github.com/rcore-os/tgoskits/compare/axvm-v0.5.21...axvm-v0.5.22) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-plat, ax-hal, ax-driver, ax-std
+
 ## [0.5.21](https://github.com/rcore-os/tgoskits/compare/axvm-v0.5.20...axvm-v0.5.21) - 2026-07-08
 
 ### Other

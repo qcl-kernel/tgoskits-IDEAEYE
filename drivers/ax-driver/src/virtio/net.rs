@@ -7,7 +7,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use ax_kernel_guard::NoPreemptIrqSave;
+use ax_sync::PreemptIrqSaveGuard;
 use rd_net::{DmaBuffer, Event, IRxQueue, ITxQueue, NetError, QueueConfig};
 use rdrive::{DriverGeneric, PlatformDevice, probe::OnProbeError};
 #[cfg(feature = "pci")]
@@ -21,6 +21,7 @@ use virtio_drivers::{
 #[cfg(feature = "pci")]
 use crate::{PciIrqRequirement, binding_info_from_pci};
 use crate::{
+    binding_info_from_fdt,
     net::PlatformDeviceNet,
     virtio::{self, VirtIoHalImpl, VirtIoTransport},
 };
@@ -133,7 +134,7 @@ impl<T: VirtIoTransport> VirtioNetInnerCell<T> {
     }
 
     fn with_task<R>(&self, f: impl FnOnce(&mut NetInner<T>) -> R) -> R {
-        let _guard = NoPreemptIrqSave::new();
+        let _guard = PreemptIrqSaveGuard::new();
         let _active = VirtioNetAccessGuard::enter_task(&self.access_active);
         // SAFETY: `access_active` serializes all mutable access to the shared
         // raw transport. Task-side callers also keep local IRQ/preemption off.
@@ -377,7 +378,29 @@ pub fn register_transport<T: Transport + 'static>(
     transport: T,
 ) -> Result<(), OnProbeError> {
     let net = make_net(transport)?;
-    let irq = plat_dev.register_net("virtio-net", net);
+    let dma = axklib::dma::device(dma_api::DmaDeviceInfo::new(
+        dma_api::DmaDomainId::Direct,
+        dma_api::DmaCoherency::NonCoherent,
+        dma_api::DmaConstraints::new(u64::MAX),
+    ));
+    let irq = plat_dev.register_net("virtio-net", net, dma);
+    log::info!("registered virtio network device irq={irq:?}");
+    Ok(())
+}
+
+pub fn register_fdt_transport<T: Transport + 'static>(
+    info: &rdrive::register::FdtInfo<'_>,
+    plat_dev: PlatformDevice,
+    transport: T,
+) -> Result<(), OnProbeError> {
+    let net = make_net(transport)?;
+    let binding = binding_info_from_fdt(info)?;
+    let dma = axklib::dma::device(dma_api::DmaDeviceInfo::new(
+        dma_api::DmaDomainId::Direct,
+        crate::binding_resolver::dma_coherency_from_fdt(info),
+        dma_api::DmaConstraints::new(u64::MAX),
+    ));
+    let irq = plat_dev.register_net_with_info("virtio-net", net, dma, binding);
     log::info!("registered virtio network device irq={irq:?}");
     Ok(())
 }
@@ -387,11 +410,12 @@ fn register_pci_transport<T: Transport + 'static>(
     probe: rdrive::probe::pci::ProbePci<'_>,
     transport: T,
 ) -> Result<(), OnProbeError> {
+    let dma = crate::pci::device_dma(probe.info(), u64::MAX);
     let info = binding_info_from_pci(probe.info(), PciIrqRequirement::Required)?;
     let net = make_net(transport)?;
     let irq = probe
         .into_platform_device()
-        .register_net_with_info("virtio-net", net, info);
+        .register_net_with_info("virtio-net", net, dma, info);
     log::info!("registered virtio network device irq={irq:?}");
     Ok(())
 }

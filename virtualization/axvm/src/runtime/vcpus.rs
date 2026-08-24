@@ -12,28 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::format;
-
-use ax_errno::{AxResult, ax_err_type};
+use std::{cell::Cell, format, sync::Arc};
 
 use crate::{
-    AsVCpuTask, GuestPhysAddr, StopReason, VCpuTask, VmStatus, VmVcpuState,
-    arch::{ArchOps, CurrentArch, VcpuRunAction},
+    AsVCpuTask, AxVmResult, GuestPhysAddr, StopReason, VCpuTask, VmStatus, VmVcpuState,
+    arch::current::CurrentArch,
+    architecture::{ArchOps, Architecture, VcpuRunAction},
+    ax_err_type,
     runtime::{VCpuRef, VMRef, sub_running_vm_count},
-    vm::VmRuntimeHandle,
+    vm::{PendingInterrupt, VmRuntimeHandle},
 };
 
 const KERNEL_STACK_SIZE: usize = 0x40000; // 256 KiB
-
-/// Blocks the current thread until it is explicitly woken up, using the wait queue
-/// associated with the VCpus of the specified VM.
-///
-/// # Arguments
-///
-/// * `vm_id` - The ID of the VM whose VCpu wait queue is used to block the current thread.
-fn wait(vm_vcpus: &VmRuntimeHandle) {
-    vm_vcpus.wait();
-}
 
 /// Blocks the current thread until the provided condition is met, using the wait queue
 /// associated with the VCpus of the specified VM.
@@ -49,6 +39,10 @@ where
     vm_vcpus.wait_until(condition);
 }
 
+fn vcpu_start_is_ready(vm_running: bool, task_registered: bool) -> bool {
+    vm_running && task_registered
+}
+
 /// Notifies the primary VCpu task associated with the specified VM to wake up and resume execution.
 /// This function is used to notify the primary VCpu of a VM to start running after the VM has been booted.
 ///
@@ -61,11 +55,9 @@ pub(crate) fn notify_primary_vcpu(vm_id: usize) {
         warn!("VM[{vm_id}] not found while notifying primary vCPU");
         return;
     };
-    if let Err(err) = vm.with_runtime(|runtime| {
-        runtime.notify_one();
-        Ok(())
-    }) {
-        warn!("VM[{vm_id}] vCPU runtime not found: {err:?}");
+    match vm.runtime_handle() {
+        Ok(runtime) => runtime.notify_one(),
+        Err(err) => warn!("VM[{vm_id}] vCPU runtime not found: {err:?}"),
     }
 }
 
@@ -76,40 +68,22 @@ pub(crate) fn notify_primary_vcpu(vm_id: usize) {
 ///
 /// * `vm_id` - The ID of the VM whose VCpus should be notified.
 pub(crate) fn notify_all_vcpus(vm_id: usize) {
-    if let Some(vm) = crate::get_vm_by_id(vm_id) {
-        let _ = vm.with_runtime(|runtime| {
-            runtime.notify_all();
-            Ok(())
-        });
-    }
-}
-
-pub(crate) fn queue_interrupt(vm_id: usize, vcpu_id: usize, vector: usize) -> AxResult {
-    let vm = crate::get_vm_by_id(vm_id)
-        .ok_or_else(|| ax_err_type!(NotFound, format!("VM[{vm_id}] not found")))?;
-    if !matches!(vm.status(), VmStatus::Running | VmStatus::Paused) {
-        return Err(ax_err_type!(
-            BadState,
-            format!("VM[{vm_id}] is not accepting interrupts")
-        ));
-    }
-
-    let cpu_id = vm.with_runtime(|runtime| runtime.queue_interrupt(vcpu_id, vector))?;
-    vm.with_runtime(|runtime| {
+    if let Some(vm) = crate::get_vm_by_id(vm_id)
+        && let Ok(runtime) = vm.runtime_handle()
+    {
         runtime.notify_all();
-        Ok(())
-    })?;
-    crate::host::task::send_ipi(cpu_id);
-    Ok(())
+    }
 }
 
-#[cfg(target_arch = "loongarch64")]
-pub(crate) fn queue_external_interrupt(
+pub(crate) fn queue_interrupt(vm_id: usize, vcpu_id: usize, vector: usize) -> AxVmResult {
+    queue_pending_interrupt(vm_id, vcpu_id, PendingInterrupt::Normal(vector))
+}
+
+pub(crate) fn queue_pending_interrupt(
     vm_id: usize,
     vcpu_id: usize,
-    vector: usize,
-    physical_irq: usize,
-) -> AxResult {
+    interrupt: PendingInterrupt,
+) -> AxVmResult {
     let vm = crate::get_vm_by_id(vm_id)
         .ok_or_else(|| ax_err_type!(NotFound, format!("VM[{vm_id}] not found")))?;
     if !matches!(vm.status(), VmStatus::Running | VmStatus::Paused) {
@@ -119,17 +93,33 @@ pub(crate) fn queue_external_interrupt(
         ));
     }
 
-    let cpu_id =
-        vm.with_runtime(|runtime| runtime.queue_external_interrupt(vcpu_id, vector, physical_irq))?;
-    vm.with_runtime(|runtime| {
-        runtime.notify_all();
-        Ok(())
-    })?;
+    let runtime = vm.runtime_handle()?;
+    let cpu_id = runtime.queue_pending_interrupt(vcpu_id, interrupt)?;
+    runtime.notify_all();
     crate::host::task::send_ipi(cpu_id);
     Ok(())
 }
 
-pub(crate) fn inject_pending_interrupts<A: ArchOps>(
+/// Wake and kick a target vCPU after an architecture IRQ backend has
+/// published pending state outside the generic runtime queue.
+pub(crate) fn notify_vcpu(vm_id: usize, vcpu_id: usize) -> AxVmResult {
+    let vm = crate::get_vm_by_id(vm_id)
+        .ok_or_else(|| ax_err_type!(NotFound, format!("VM[{vm_id}] not found")))?;
+    if !matches!(vm.status(), VmStatus::Running | VmStatus::Paused) {
+        return Err(ax_err_type!(
+            BadState,
+            format!("VM[{vm_id}] is not accepting interrupts")
+        ));
+    }
+
+    let runtime = vm.runtime_handle()?;
+    let cpu_id = runtime.vcpu_cpu_id(vcpu_id)?;
+    runtime.notify_all();
+    crate::host::task::send_ipi(cpu_id);
+    Ok(())
+}
+
+pub(crate) fn inject_pending_interrupts<A: Architecture>(
     vm_id: usize,
     vcpu_id: usize,
     vcpu: &crate::vm::AxVCpuRef<A::VCpu>,
@@ -138,11 +128,11 @@ pub(crate) fn inject_pending_interrupts<A: ArchOps>(
         warn!("VM[{vm_id}] not found, cannot drain VCpu[{vcpu_id}] interrupts");
         return;
     };
-    let Ok(interrupts) = vm.with_runtime(|runtime| Ok(runtime.drain_pending_interrupts(vcpu_id)))
-    else {
+    let Ok(runtime) = vm.runtime_handle() else {
         warn!("VM[{vm_id}] vCPU runtime not found, cannot drain VCpu[{vcpu_id}] interrupts");
         return;
     };
+    let interrupts = runtime.drain_pending_interrupts(vcpu_id);
 
     for interrupt in interrupts {
         A::inject_pending_interrupt(&vm, vcpu, interrupt);
@@ -162,10 +152,9 @@ pub(crate) fn inject_pending_interrupts<A: ArchOps>(
 /// It will join all VCpu tasks to ensure they are fully cleaned up.
 pub(crate) fn cleanup_vm_vcpus(vm_id: usize) {
     if let Some(vm) = crate::get_vm_by_id(vm_id)
-        && let Err(err) = vm.with_runtime(|runtime| {
-            runtime.join_all_vcpu_tasks(vm_id);
-            Ok(())
-        })
+        && let Err(err) = vm
+            .runtime_handle()
+            .and_then(|runtime| runtime.join_all_vcpu_tasks(vm_id))
     {
         warn!("VM[{vm_id}] vCPU runtime cleanup skipped: {err:?}");
     }
@@ -173,10 +162,84 @@ pub(crate) fn cleanup_vm_vcpus(vm_id: usize) {
 
 /// Marks the VCpu of the specified VM as running.
 fn mark_vcpu_running(vm: &VMRef) {
-    let _ = vm.with_runtime(|runtime| {
+    if let Ok(runtime) = vm.runtime_handle() {
         runtime.mark_vcpu_running();
-        Ok(())
-    });
+    }
+}
+
+type CpuOnStartAckLock<T> = std::sync::Mutex<T>;
+
+#[allow(dead_code)]
+pub(crate) struct CpuOnStartAck {
+    inner: CpuOnStartAckLock<CpuOnStartAckInner>,
+}
+
+struct CpuOnStartAckInner {
+    started: bool,
+    cancelled: bool,
+    result: Option<crate::AxVmResult>,
+}
+
+#[allow(dead_code)]
+impl CpuOnStartAck {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: CpuOnStartAckLock::new(CpuOnStartAckInner {
+                started: false,
+                cancelled: false,
+                result: None,
+            }),
+        }
+    }
+
+    pub(crate) fn begin_startup(&self) -> bool {
+        let mut inner = self.lock_inner();
+        if inner.cancelled {
+            false
+        } else {
+            inner.started = true;
+            true
+        }
+    }
+
+    pub(crate) fn cancel_before_startup(&self) -> bool {
+        let mut inner = self.lock_inner();
+        if inner.started || inner.result.is_some() {
+            false
+        } else {
+            inner.cancelled = true;
+            true
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.lock_inner().cancelled
+    }
+
+    pub(crate) fn complete(&self, result: crate::AxVmResult) {
+        self.lock_inner().result = Some(result);
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.lock_inner().result.is_some()
+    }
+
+    pub(crate) fn take_result(&self) -> Option<crate::AxVmResult> {
+        self.lock_inner().result.take()
+    }
+
+    fn lock_inner(&self) -> impl std::ops::DerefMut<Target = CpuOnStartAckInner> + '_ {
+        use crate::sync::MutexExt;
+        self.inner.lock_unpoisoned()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum VcpuOnError {
+    AlreadyOn,
+    OnPending,
+    StartFailed,
 }
 
 /// Boot target VCpu on the specified VM.
@@ -188,37 +251,128 @@ fn mark_vcpu_running(vm: &VMRef) {
 /// * `vcpu_id` - The ID of the VCpu to be booted.
 /// * `entry_point` - The entry point of the VCpu.
 /// * `arg` - The argument to be passed to the VCpu.
+#[allow(dead_code)]
 pub(crate) fn vcpu_on(
     vm: VMRef,
     vcpu_id: usize,
     entry_point: GuestPhysAddr,
     arg: usize,
-) -> AxResult {
+) -> Result<(), VcpuOnError> {
     let vcpu = vm
         .vcpu_list()
         .get(vcpu_id)
         .cloned()
-        .ok_or_else(|| ax_err_type!(NotFound, format!("vCPU {vcpu_id} not found")))?;
-    if vcpu.state() != VmVcpuState::Free {
-        return Err(ax_err_type!(
-            BadState,
-            format!("vCPU {} invalid state {:?}", vcpu.id(), vcpu.state())
-        ));
+        .ok_or(VcpuOnError::StartFailed)?;
+
+    match vcpu.state() {
+        VmVcpuState::Free => {}
+        VmVcpuState::Starting => return Err(VcpuOnError::OnPending),
+        VmVcpuState::Ready | VmVcpuState::Running => return Err(VcpuOnError::AlreadyOn),
+        _ => return Err(VcpuOnError::StartFailed),
     }
 
-    vcpu.set_entry(entry_point)?;
-    CurrentArch::set_vcpu_on_args(&vcpu, vcpu_id, arg);
+    vcpu.reserve_for_cpu_on()
+        .map_err(|_| VcpuOnError::OnPending)?;
 
-    let vcpu_task = alloc_vcpu_task(&vm, vcpu);
-    vm.with_runtime(|runtime| {
-        runtime.add_vcpu_task(vcpu_id, vcpu_task);
+    let start_result = (|| {
+        let runtime = vm.runtime_handle().map_err(|_| VcpuOnError::StartFailed)?;
+        if runtime.has_vcpu_task(vcpu_id) {
+            return Err(VcpuOnError::StartFailed);
+        }
+
+        vcpu.set_entry(entry_point)
+            .map_err(|_| VcpuOnError::StartFailed)?;
+        CurrentArch::set_vcpu_on_args(&vcpu, vcpu_id, arg);
+
+        let ack = Arc::new(CpuOnStartAck::new());
+        runtime
+            .insert_cpu_on_start_ack(vcpu_id, ack.clone())
+            .map_err(|_| VcpuOnError::StartFailed)?;
+
+        let vcpu_task = build_vcpu_task(&vm, vcpu.clone());
+        spawn_registered_vcpu_task(
+            vm.id(),
+            vcpu_id,
+            runtime.clone(),
+            vcpu_task,
+            vcpu.priority(),
+        );
+        runtime.notify_all();
+
+        runtime.wait_until(|| ack.is_complete() || !vm.running());
+
+        if !ack.is_complete() && !vm.running() {
+            if ack.cancel_before_startup() {
+                runtime.notify_all();
+
+                if let Some(task) = runtime.remove_vcpu_task(vcpu_id) {
+                    let _ = task.join();
+                }
+
+                runtime.remove_cpu_on_start_ack(vcpu_id);
+                return Err(VcpuOnError::StartFailed);
+            }
+
+            runtime.wait_until(|| ack.is_complete());
+        }
+
+        let result = ack.take_result().unwrap_or_else(|| {
+            Err(ax_err_type!(
+                BadState,
+                format!("vCPU {vcpu_id} CPU_ON startup did not complete")
+            ))
+        });
+        runtime.remove_cpu_on_start_ack(vcpu_id);
+
+        if result.is_err() {
+            runtime.remove_vcpu_task(vcpu_id);
+            return Err(VcpuOnError::StartFailed);
+        }
+
         Ok(())
-    })?;
-    Ok(())
+    })();
+
+    if start_result.is_err() && vcpu.state() == VmVcpuState::Starting {
+        vcpu.rollback_cpu_on();
+    }
+    start_result
+}
+pub(crate) fn spawn_registered_vcpu_task(
+    vm_id: usize,
+    vcpu_id: usize,
+    runtime: std::sync::Arc<VmRuntimeHandle>,
+    task: crate::TaskInner,
+    priority: Option<isize>,
+) -> crate::AxTaskRef {
+    crate::host::task::spawn_task_with(task, |task_ref| {
+        if let Some(prio) = priority
+            && !crate::host::task::set_task_priority(task_ref, prio)
+        {
+            debug!(
+                "VM[{vm_id}] vCPU[{vcpu_id}] requested priority {prio} is not supported by the \
+                 current scheduler; using default"
+            );
+        }
+        runtime
+            .add_vcpu_task(vcpu_id, task_ref.clone())
+            .unwrap_or_else(|error| {
+                panic!("VM[{vm_id}] vCPU[{vcpu_id}] task registration failed: {error}")
+            });
+    })
 }
 
-pub(crate) fn alloc_vcpu_task(vm: &VMRef, vcpu: VCpuRef) -> crate::AxTaskRef {
-    crate::host::task::spawn_task(build_vcpu_task(vm, vcpu))
+fn spawn_deferred_reset_task(vm_id: usize) {
+    let reset_task = crate::TaskInner::new(
+        move || {
+            if let Err(err) = crate::runtime::reset_vm(vm_id) {
+                warn!("VM[{vm_id}] deferred reset failed: {err:?}");
+                crate::host::task::wait_queue_wake(&super::VMM, 1);
+            }
+        },
+        format!("VM[{vm_id}]-reset"),
+        KERNEL_STACK_SIZE,
+    );
+    crate::host::task::spawn_task(reset_task);
 }
 
 pub(crate) fn build_vcpu_task(vm: &VMRef, vcpu: VCpuRef) -> crate::TaskInner {
@@ -268,7 +422,7 @@ fn vcpu_task_cpu_mask(vm_id: usize, vcpu_id: usize, requested_mask: usize) -> us
         return initialized_requested_mask;
     }
 
-    let fallback_mask = enabled_mask & enabled_mask.wrapping_neg();
+    let fallback_mask = enabled_mask.isolate_lowest_one();
     warn!(
         "VM[{vm_id}] VCpu[{vcpu_id}] requested host CPU mask {requested_mask:#x}, but none of \
          those CPUs initialized AxVM; using initialized host CPU mask {fallback_mask:#x}"
@@ -288,37 +442,144 @@ fn vcpu_run() {
     let vcpu = curr.as_vcpu_task().vcpu.clone();
     let vm_id = vm.id();
     let vcpu_id = vcpu.id();
-    let Ok(runtime) = vm.with_runtime(|runtime| Ok(runtime.clone())) else {
+    let Ok(runtime) = vm.runtime_handle() else {
         warn!("VM[{vm_id}] vCPU runtime not found, VCpu[{vcpu_id}] exiting");
         return;
     };
 
     info!("VM[{}] VCpu[{}] waiting for running", vm.id(), vcpu.id());
-    wait_for(&runtime, || vm.running());
+    let cpu_on_start_ack = runtime.cpu_on_start_ack(vcpu_id);
+    wait_for(&runtime, || {
+        vcpu_start_is_ready(vm.running(), runtime.has_vcpu_task(vcpu_id))
+            || cpu_on_start_ack
+                .as_ref()
+                .is_some_and(|ack| ack.is_cancelled())
+    });
 
-    info!("VM[{}] VCpu[{}] running...", vm.id(), vcpu.id());
-    CurrentArch::before_first_run(&vm, &vcpu);
-    mark_vcpu_running(&vm);
+    if let Some(ack) = &cpu_on_start_ack {
+        if !ack.begin_startup() {
+            ack.complete(Err(ax_err_type!(
+                BadState,
+                format!("vCPU {vcpu_id} CPU_ON startup was cancelled")
+            )));
+            runtime.notify_all();
+            return;
+        }
+
+        match vcpu.bind_after_cpu_on_or_rollback() {
+            Ok(()) => {
+                CurrentArch::before_first_run(&vm, &vcpu);
+                runtime.publish_cpu_on_start_success(ack);
+                runtime.notify_all();
+            }
+            Err(err) => {
+                ack.complete(Err(err));
+                runtime.notify_all();
+                runtime.remove_cpu_on_start_ack(vcpu_id);
+                runtime.remove_vcpu_task(vcpu_id);
+                return;
+            }
+        }
+    } else {
+        CurrentArch::before_first_run(&vm, &vcpu);
+        mark_vcpu_running(&vm);
+    }
+
+    info!(
+        "VM[{}] VCpu[{}] running on CPU{}...",
+        vm.id(),
+        vcpu.id(),
+        crate::host::cpu::current_id()
+    );
+    // Independent re-execution evidence is published *after* each guest entry,
+    // at the bottom of the run loop (after `run_vcpu` returns). Every wake from
+    // suspend below also re-enters the guest and is counted there, so the
+    // control plane can prove the guest actually re-executed after resume/reset.
 
     loop {
-        CurrentArch::before_vcpu_run(&vm, &vcpu);
+        if vcpu_id == 0 {
+            // Host services only publish a request and wake this task. Polling
+            // here avoids running virtual-device and VGIC callbacks in host
+            // console context, where an idle guest may otherwise stall input.
+            let _ = poll_primary_vcpu_devices_with(&runtime, || poll_vm_devices(&vm));
+        }
 
-        match CurrentArch::run_vcpu(&vm, &vcpu) {
-            Ok(VcpuRunAction::Yield) => {}
-            Ok(VcpuRunAction::Wait) => wait(&runtime),
-            Ok(VcpuRunAction::Stop(reason)) => {
-                if let Err(err) = vm.stop(reason) {
-                    warn!("VM[{vm_id}] shutdown failed: {err:?}");
-                }
-                notify_all_vcpus(vm_id);
-            }
+        // The guest has entered (and exited) for this run-loop iteration: the
+        // control plane reads this as independent re-execution evidence. It is
+        // published *only* after a successful `run_vcpu`, so a failed entry
+        // (bind / `before_vcpu_run` / `vcpu.run()` / exit handling that returns
+        // `Err` before the guest ever runs) cannot advance the counter — a
+        // broken wake path that only flips the status without ever re-entering
+        // the guest cannot advance it either.
+        let action = match CurrentArch::run_vcpu(&vm, &vcpu) {
+            Ok(action) => Some(action),
             Err(err) => {
                 error!("VM[{vm_id}] run VCpu[{vcpu_id}] get error {err:?}");
                 if let Err(err) = vm.stop(StopReason::Fault(format!("{err:?}"))) {
                     warn!("VM[{vm_id}] shutdown failed after vCPU error: {err:?}");
                 }
-                // Notify all vCPUs to wake up to check the shutdown flag
+                // Notify all vCPUs to wake up to check the shutdown flag. The
+                // guest never entered on this iteration, so skip the
+                // re-execution evidence below; the suspend/stopping checks that
+                // follow still run and break the loop.
                 notify_all_vcpus(vm_id);
+                None
+            }
+        };
+
+        if let Some(action) = action {
+            runtime.inc_guest_entry();
+
+            match action {
+                VcpuRunAction {
+                    exits_vcpu: true, ..
+                } => {
+                    if let Err(err) = vcpu.power_off_after_cpu_off() {
+                        warn!("VM[{vm_id}] VCpu[{vcpu_id}] CPU_OFF cleanup failed: {err:?}");
+                    }
+                    runtime.remove_vcpu_task(vcpu_id);
+                    if !runtime.consume_cpu_off_reservation(vcpu_id) {
+                        let _ = runtime.mark_vcpu_exiting();
+                    }
+                    break;
+                }
+                VcpuRunAction {
+                    resets_vm: true, ..
+                } => {
+                    if runtime.request_deferred_reset()
+                        && let Err(err) = vm.stop(StopReason::Forced)
+                    {
+                        if vm.stopping() {
+                            warn!(
+                                "VM[{vm_id}] reset requested while VM is already stopping: {err:?}"
+                            );
+                        } else {
+                            let _ = runtime.take_deferred_reset_request();
+                            warn!("VM[{vm_id}] failed to request deferred reset stop: {err:?}");
+                            if let Err(stop_err) = vm.stop(StopReason::Fault(format!("{err:?}"))) {
+                                warn!(
+                                    "VM[{vm_id}] shutdown after reset request failure failed: \
+                                     {stop_err:?}"
+                                );
+                            }
+                        }
+                    }
+                    notify_all_vcpus(vm_id);
+                }
+                VcpuRunAction {
+                    stop_reason: Some(reason),
+                    ..
+                } => {
+                    if let Err(err) = vm.stop(reason) {
+                        warn!("VM[{vm_id}] shutdown failed: {err:?}");
+                    }
+                    notify_all_vcpus(vm_id);
+                }
+                VcpuRunAction {
+                    waits_for_event: true,
+                    ..
+                } => CurrentArch::wait_for_vcpu_event(&vm, &vcpu, &runtime),
+                VcpuRunAction { .. } => {}
             }
         }
 
@@ -328,7 +589,27 @@ fn vcpu_run() {
                 "VM[{}] VCpu[{}] is suspended, waiting for resume...",
                 vm_id, vcpu_id
             );
-            wait_for(&runtime, || !vm.suspending());
+            // Park the vCPU until it is resumed. The wait condition closure is
+            // evaluated by the wait queue while holding its lock, immediately
+            // before the task is enqueued, so publishing the pause-completion
+            // evidence inside it makes the signal visible only once the vCPU is
+            // genuinely committed to blocking. A resume that races in before the
+            // vCPU reaches the wait keeps the suspend flag clear and makes the
+            // condition already true, so the vCPU never publishes a park and
+            // never blocks; the control-plane probe then times out waiting for
+            // `guest_park_count`, correctly reporting that the pause did not
+            // genuinely complete instead of passing on a fake.
+            let parked = Cell::new(false);
+            wait_for(&runtime, || {
+                if !vm.suspending() {
+                    return true;
+                }
+                if !parked.get() {
+                    runtime.inc_guest_park();
+                    parked.set(true);
+                }
+                false
+            });
             info!("VM[{}] VCpu[{}] resumed from suspend", vm_id, vcpu_id);
             continue;
         }
@@ -341,22 +622,182 @@ fn vcpu_run() {
             );
 
             if runtime.mark_vcpu_exiting() {
+                let reset_after_stop = runtime.take_deferred_reset_request();
                 info!("VM[{vm_id}] VCpu[{vcpu_id}] last VCpu exiting, decreasing running VM count");
 
+                if let Err(err) = CurrentArch::on_last_vcpu_exit(&vm) {
+                    warn!("VM[{vm_id}] architecture device cleanup failed: {err:?}");
+                    runtime.record_lifecycle_error(err);
+                }
                 if let Err(err) = vm.finish_stop() {
                     warn!("VM[{vm_id}] finish stop failed: {err:?}");
+                    runtime.record_lifecycle_error(err);
+                } else {
+                    info!("VM[{}] state changed to Stopped", vm_id);
                 }
-                info!("VM[{}] state changed to Stopped", vm_id);
-
-                CurrentArch::on_last_vcpu_exit(vm_id);
 
                 sub_running_vm_count(1);
-                crate::host::task::wait_queue_wake(&super::VMM, 1);
+                if reset_after_stop {
+                    spawn_deferred_reset_task(vm_id);
+                } else {
+                    crate::host::task::wait_queue_wake(&super::VMM, 1);
+                }
             }
 
             break;
         }
+
+        // AxVM may run on ArceOS's cooperative FIFO scheduler. Yield after
+        // every completed VM exit so host services such as the management
+        // console and virtual serial input can make progress alongside a
+        // continuously runnable guest.
+        crate::host::task::yield_now();
     }
 
     info!("VM[{}] VCpu[{}] exiting...", vm_id, vcpu_id);
+}
+
+fn poll_primary_vcpu_devices_with(runtime: &VmRuntimeHandle, poll_devices: impl FnOnce()) -> bool {
+    let consumed_request = runtime.take_device_poll_request();
+    poll_devices();
+    consumed_request
+}
+
+pub(super) fn poll_vm_devices(vm: &VMRef) {
+    poll_vm_input_devices(vm);
+    poll_vm_dma_devices(vm);
+}
+
+pub(super) fn poll_vm_input_devices(vm: &VMRef) {
+    let Ok(devices) = vm.get_devices() else {
+        return;
+    };
+    let now_ns = ax_std::os::arceos::modules::ax_hal::time::monotonic_time_nanos();
+    for device in devices.iter_pollable_dev() {
+        if let Err(error) = device.poll(now_ns) {
+            warn!("VM[{}] failed to poll virtual device: {error}", vm.id());
+        }
+    }
+}
+
+fn poll_vm_dma_devices(vm: &VMRef) {
+    let Ok(devices) = vm.get_devices() else {
+        return;
+    };
+    let now_ns = ax_std::os::arceos::modules::ax_hal::time::monotonic_time_nanos();
+    let mut memory = crate::vm::VmGuestMemoryAccess::new(vm);
+    devices.poll_dma_devices(now_ns, &mut memory, |result| {
+        if let Err(error) = result {
+            warn!("VM[{}] failed to poll DMA virtual device: {error}", vm.id());
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vcpu_waits_for_runtime_registration_before_entering_guest() {
+        assert!(!vcpu_start_is_ready(true, false));
+        assert!(vcpu_start_is_ready(true, true));
+        assert!(!vcpu_start_is_ready(false, true));
+    }
+
+    #[test]
+    fn request_published_before_wfi_snapshot_prevents_sleep_and_is_consumed_once() {
+        let runtime = Arc::new(VmRuntimeHandle::new());
+        let request_published = Arc::new(std::sync::Barrier::new(2));
+        let notifier_runtime = runtime.clone();
+        let notifier_published = request_published.clone();
+        let notifier = std::thread::spawn(move || {
+            notifier_runtime.notify_device_poll();
+            notifier_published.wait();
+        });
+
+        request_published.wait();
+        let wait_snapshot = runtime.vcpu_event_wait_snapshot();
+        let wait_count = std::cell::Cell::new(0);
+        crate::vm::wait_for_vcpu_event_if_idle(
+            &runtime,
+            &wait_snapshot,
+            || true,
+            |_| wait_count.set(wait_count.get() + 1),
+        );
+
+        assert_eq!(wait_count.get(), 0);
+        let poll_count = std::cell::Cell::new(0);
+        let consumed = poll_primary_vcpu_devices_with(&runtime, || {
+            poll_count.set(poll_count.get() + 1);
+        });
+
+        assert!(consumed);
+        assert_eq!(poll_count.get(), 1);
+        assert!(!poll_primary_vcpu_devices_with(&runtime, || {
+            poll_count.set(poll_count.get() + 1);
+        }));
+        assert_eq!(poll_count.get(), 2);
+        notifier.join().unwrap();
+    }
+
+    #[test]
+    fn request_published_at_wait_boundary_prevents_sleep_and_is_consumed_once() {
+        let runtime = Arc::new(VmRuntimeHandle::new());
+        let wait_snapshot = runtime.vcpu_event_wait_snapshot();
+        let wait_boundary_reached = Arc::new(std::sync::Barrier::new(2));
+        let request_published = Arc::new(std::sync::Barrier::new(2));
+        let notifier_runtime = runtime.clone();
+        let notifier_wait_boundary = wait_boundary_reached.clone();
+        let notifier_published = request_published.clone();
+        let notifier = std::thread::spawn(move || {
+            notifier_wait_boundary.wait();
+            notifier_runtime.notify_device_poll();
+            notifier_published.wait();
+        });
+
+        let sleep_count = std::cell::Cell::new(0);
+        crate::vm::wait_for_vcpu_event_if_idle(
+            &runtime,
+            &wait_snapshot,
+            || true,
+            |wake_condition| {
+                wait_boundary_reached.wait();
+                request_published.wait();
+                if !wake_condition() {
+                    sleep_count.set(sleep_count.get() + 1);
+                }
+            },
+        );
+
+        assert_eq!(sleep_count.get(), 0);
+        let poll_count = std::cell::Cell::new(0);
+        let consumed = poll_primary_vcpu_devices_with(&runtime, || {
+            poll_count.set(poll_count.get() + 1);
+        });
+
+        assert!(consumed);
+        assert_eq!(poll_count.get(), 1);
+        assert!(!poll_primary_vcpu_devices_with(&runtime, || {
+            poll_count.set(poll_count.get() + 1);
+        }));
+        assert_eq!(poll_count.get(), 2);
+        notifier.join().unwrap();
+    }
+
+    #[test]
+    fn cpu_on_start_ack_cancel_before_startup_blocks_late_startup() {
+        let ack = CpuOnStartAck::new();
+
+        assert!(ack.cancel_before_startup());
+        assert!(ack.is_cancelled());
+        assert!(!ack.begin_startup());
+
+        ack.complete(Err(ax_err_type!(
+            BadState,
+            "vCPU 1 CPU_ON startup was cancelled"
+        )));
+
+        assert!(ack.is_complete());
+        assert!(ack.take_result().unwrap().is_err());
+    }
 }

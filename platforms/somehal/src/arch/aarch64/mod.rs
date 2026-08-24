@@ -44,10 +44,11 @@ impl PlatOp for Plat {
         gic::irq_set_affinity(irq, affinity)
     }
 
-    fn send_ipi(irq: IrqId, target: crate::irq::IpiTarget) {
-        if is_gic_domain(irq.domain) {
-            gic::send_ipi((irq.hwirq.0 as usize).into(), target);
+    fn send_ipi(irq: IrqId, target: crate::irq::IpiTarget) -> Result<(), IrqError> {
+        if !is_gic_domain(irq.domain) {
+            return Err(IrqError::InvalidIrq);
         }
+        gic::send_ipi((irq.hwirq.0 as usize).into(), target)
     }
 
     fn ipi_irq() -> IrqId {
@@ -81,11 +82,13 @@ impl PlatOp for Plat {
 
     fn secondary_init() {}
 
-    fn secondary_init_intc(cpu_idx: usize) {
-        gic::init_cpu(cpu_idx);
-    }
-
-    fn secondary_init_systick() {
-        systick::setup_systick_irq();
+    fn init_boot_irq_cpu(cpu_idx: usize, role: crate::irq::CpuBootRole) {
+        match role {
+            crate::irq::CpuBootRole::Primary => {}
+            crate::irq::CpuBootRole::Secondary => {
+                gic::init_cpu(cpu_idx);
+                systick::setup_systick_irq();
+            }
+        }
     }
 }

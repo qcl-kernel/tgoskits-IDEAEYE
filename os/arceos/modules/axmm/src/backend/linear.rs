@@ -9,6 +9,10 @@ impl Backend {
         Self::Linear { pa_va_offset }
     }
 
+    pub(crate) const fn new_boot_linear(pa_va_offset: usize) -> Self {
+        Self::BootLinear { pa_va_offset }
+    }
+
     pub(crate) fn map_linear(
         &self,
         start: VirtAddr,
@@ -16,6 +20,7 @@ impl Backend {
         flags: MappingFlags,
         pt: &mut PageTable,
         pa_va_offset: usize,
+        allow_huge: bool,
     ) -> bool {
         let va_to_pa = |va: VirtAddr| PhysAddr::from(va.as_usize() - pa_va_offset);
         debug!(
@@ -26,8 +31,7 @@ impl Backend {
             va_to_pa(start + size),
             flags
         );
-        pt.cursor()
-            .map_region(start, va_to_pa, size, flags, false)
+        pt.map_region(start, va_to_pa, size, flags, allow_huge)
             .is_ok()
     }
 
@@ -39,6 +43,6 @@ impl Backend {
         _pa_va_offset: usize,
     ) -> bool {
         debug!("unmap_linear: [{:#x}, {:#x})", start, start + size);
-        pt.cursor().unmap_region(start, size).is_ok()
+        pt.unmap(start, size).is_ok()
     }
 }

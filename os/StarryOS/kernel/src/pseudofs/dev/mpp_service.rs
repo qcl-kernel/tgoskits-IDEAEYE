@@ -16,10 +16,9 @@ use core::{any::Any, ffi::c_int, mem::size_of};
 
 use ax_driver::jpeg::{self, mpp, registers};
 use ax_runtime::hal::cpu::asm::user_copy;
-use ax_sync::Mutex;
 use axfs_ng_vfs::{DeviceId, VfsError, VfsResult};
 
-use crate::{file::dmabuf::resolve_contiguous_dmabuf, pseudofs::DeviceOps};
+use crate::{file::dmabuf::resolve_contiguous_dmabuf, pseudofs::DeviceOps, sync::Mutex};
 
 fn copy_from_user(dst: *mut u8, src: *const u8, size: usize) -> VfsResult<()> {
     if unsafe { user_copy(dst, src, size) } != 0 {
@@ -219,7 +218,7 @@ fn resolve_fd(fd: u32) -> Option<u32> {
         warn!("mpp_service: register fd {fd} is not a resolvable dma-buf");
         return None;
     };
-    // The decoder is 32-bit (device_with_mask(u32::MAX)); reject buffers above
+    // The decoder is limited to 32-bit device addresses; reject buffers above
     // 4 GiB rather than silently truncating the address. /dev/dma_heap buffers
     // are allocated below 4 GiB (dma32), so this should not trigger.
     let phys = buf.phys_base();

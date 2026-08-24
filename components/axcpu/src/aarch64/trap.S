@@ -112,6 +112,12 @@ exception_vector_base:
     mrs     x9, tpidr_el0
     ldp     x10, x11, [x1, {trapframe_size}]
     stp     x8, x9, [x1, {trapframe_size}]
+
+    // SP_EL0 is the sole current-context source. `enter_user` spills it in the
+    // pinned kernel stack frame before lending SP_EL0 to userspace.
+    ldr     x12, [x10, 12 * 8]
+    msr     sp_el0, x12
+
     mov     sp, x10
     msr     tpidr_el0, x11
 
@@ -121,27 +127,29 @@ exception_vector_base:
     ldp     x25, x26, [sp, 6 * 8]
     ldp     x27, x28, [sp, 8 * 8]
     ldp     x29, x30, [sp, 10 * 8]
-    add     sp, sp, 12 * 8
+    add     sp, sp, 14 * 8
 
     ret
 
 .global enter_user
 enter_user:
-    sub     sp, sp, 12 * 8
+    sub     sp, sp, 14 * 8
     stp     x29, x30, [sp, 10 * 8]
     stp     x27, x28, [sp, 8 * 8]
     stp     x25, x26, [sp, 6 * 8]
     stp     x23, x24, [sp, 4 * 8]
     stp     x21, x22, [sp, 2 * 8]
     stp     x19, x20, [sp]
+    mrs     x12, sp_el0
+    str     x12, [sp, 12 * 8]
 
     mov     x10, sp
     mrs     x11, tpidr_el0
     ldp     x8, x9, [x0, {trapframe_size}]
     stp     x10, x11, [x0,{trapframe_size}]
+    // Restore user SP/TLS only in the final assembly path to eret.
     msr     sp_el0, x8
     msr     tpidr_el0, x9
-
     mov     sp, x0
 
 .Lexception_return:

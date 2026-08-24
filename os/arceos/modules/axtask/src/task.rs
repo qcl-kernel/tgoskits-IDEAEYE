@@ -3,24 +3,24 @@ use alloc::{boxed::Box, string::String, sync::Arc};
 use core::alloc::Layout;
 #[cfg(feature = "smp")]
 use core::sync::atomic::AtomicPtr;
-#[cfg(any(
-    feature = "preempt",
-    all(feature = "stack-guard-page", feature = "smp", feature = "ipi")
-))]
-use core::sync::atomic::AtomicUsize;
 use core::{
     cell::{Cell, UnsafeCell},
     fmt,
-    mem::ManuallyDrop,
+    mem::{ManuallyDrop, offset_of},
     ops::Deref,
+    pin::Pin,
+    ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering},
     task::{Context, Poll},
 };
 
-use ax_hal::context::TaskContext;
 #[cfg(feature = "tls")]
 use ax_hal::tls::TlsArea;
-use ax_kspin::SpinNoIrq;
+use ax_hal::{
+    context::{KernelTlsBase, TaskContext},
+    percpu::ExecutionContextHeader,
+};
+use ax_lazyinit::LazyInit;
 #[cfg(feature = "stack-guard-page")]
 use ax_memory_addr::PAGE_SIZE_4K;
 use ax_memory_addr::{VirtAddr, align_up_4k};
@@ -28,7 +28,11 @@ use futures_util::task::AtomicWaker;
 
 #[cfg(feature = "lockdep")]
 use crate::lockdep::HeldLockStack;
-use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue};
+use crate::{
+    AxCpuMask, AxTask, AxTaskRef, WaitQueue,
+    interrupt::{InterruptSnapshot, InterruptState},
+    sync::SpinLock,
+};
 
 #[cfg(target_pointer_width = "64")]
 const STACK_END_MAGIC: usize = 0x57AC_CE11_57AC_CE11usize;
@@ -58,6 +62,41 @@ pub enum TaskState {
     Exited  = 4,
 }
 
+/// Task-owned wrapper around the scheduler-neutral architecture header.
+///
+/// The header is the first field so the architecture `current` identity can
+/// be converted directly to this wrapper without a second publication slot.
+#[repr(C)]
+struct TaskExecutionContext {
+    header: ExecutionContextHeader,
+    owner: NonNull<AxTask>,
+}
+
+impl TaskExecutionContext {
+    fn new(owner: NonNull<AxTask>, bootstrap: bool) -> Self {
+        Self {
+            header: if bootstrap {
+                ExecutionContextHeader::new_bootstrap()
+            } else {
+                ExecutionContextHeader::new()
+            },
+            owner,
+        }
+    }
+
+    /// Reconstructs the task wrapper whose offset-zero header is current.
+    ///
+    /// # Safety
+    ///
+    /// `header` must point to the header of a live `TaskExecutionContext`, and
+    /// the scheduler must retain the raw current-task reference while used.
+    unsafe fn from_header(header: NonNull<ExecutionContextHeader>) -> &'static Self {
+        unsafe { &*header.as_ptr().cast::<Self>() }
+    }
+}
+
+const _: () = assert!(offset_of!(TaskExecutionContext, header) == 0);
+
 /// User-defined task extended data.
 #[cfg(feature = "task-ext")]
 #[extern_trait::extern_trait(
@@ -74,7 +113,7 @@ pub trait TaskExt {
 /// The inner task structure.
 pub struct TaskInner {
     id: TaskId,
-    name: SpinNoIrq<String>,
+    name: SpinLock<String>,
     is_idle: bool,
     is_init: bool,
 
@@ -82,7 +121,7 @@ pub struct TaskInner {
     state: AtomicU8,
 
     /// CPU affinity mask.
-    cpumask: SpinNoIrq<AxCpuMask>,
+    cpumask: SpinLock<AxCpuMask>,
 
     /// Scheduling policy of the task.
     sched_policy: AtomicI32,
@@ -117,14 +156,21 @@ pub struct TaskInner {
     #[cfg(feature = "irq")]
     timer_ticket_id: AtomicU64,
 
+    /// Monotonic timestamp (ns) of this task's last `Blocked -> Ready`
+    /// transition, consumed by `switch_to` for wake-latency statistics
+    /// (feature "sched-latency"). Zero means the task has not been woken
+    /// since it was last scheduled.
+    #[cfg(feature = "sched-latency")]
+    wake_ts_ns: AtomicU64,
+
     #[cfg(feature = "preempt")]
     need_resched: AtomicBool,
     #[cfg(feature = "preempt")]
     force_resched: AtomicBool,
-    #[cfg(feature = "preempt")]
-    preempt_disable_count: AtomicUsize,
+    #[cfg(axtest)]
+    initial_scheduler_frame_consumed: AtomicBool,
 
-    interrupted: AtomicBool,
+    interrupted: InterruptState,
     interrupt_waker: AtomicWaker,
 
     exit_code: AtomicI32,
@@ -132,6 +178,8 @@ pub struct TaskInner {
 
     kstack: TaskStack,
     ctx: UnsafeCell<TaskContext>,
+    /// Pinned identity and CPU-binding state published by the switch tail.
+    execution_context: LazyInit<TaskExecutionContext>,
     #[cfg(feature = "lockdep")]
     held_locks: UnsafeCell<HeldLockStack>,
 
@@ -181,14 +229,14 @@ impl TaskInner {
         debug!("new task: {}", t.id_name());
 
         #[cfg(feature = "tls")]
-        let tls = VirtAddr::from(t.tls.tls_ptr() as usize);
+        let kernel_tls = KernelTlsBase::new(t.tls.tls_ptr() as usize);
         #[cfg(not(feature = "tls"))]
-        let tls = VirtAddr::from(0);
+        let kernel_tls = KernelTlsBase::new(0);
         let kstack_top = t.kstack.top();
 
         t.entry = Cell::new(Some(Box::new(entry)));
         t.ctx_mut()
-            .init(task_entry as *const () as usize, kstack_top, tls);
+            .init(task_entry as *const () as usize, kstack_top, kernel_tls);
         if t.name() == "idle" {
             t.is_idle = true;
         }
@@ -202,12 +250,12 @@ impl TaskInner {
 
     /// Gets the name of the task.
     pub fn name(&self) -> String {
-        self.name.lock().clone()
+        self.name.lock_irqsave().clone()
     }
 
     /// Set the name of the task.
     pub fn set_name(&self, name: &str) {
-        *self.name.lock() = String::from(name);
+        *self.name.lock_irqsave() = String::from(name);
     }
 
     /// Get a combined string of the task ID and name.
@@ -275,7 +323,7 @@ impl TaskInner {
     /// Returns the cpu affinity mask of the task in type [`AxCpuMask`].
     #[inline]
     pub fn cpumask(&self) -> AxCpuMask {
-        *self.cpumask.lock()
+        *self.cpumask.lock_irqsave()
     }
 
     /// Sets the cpu affinity mask of the task.
@@ -284,7 +332,7 @@ impl TaskInner {
     /// `cpumask` - The cpu affinity mask to be set in type [`AxCpuMask`].
     #[inline]
     pub fn set_cpumask(&self, cpumask: AxCpuMask) {
-        *self.cpumask.lock() = cpumask
+        *self.cpumask.lock_irqsave() = cpumask
     }
 
     #[inline]
@@ -315,43 +363,58 @@ impl TaskInner {
         // allow `interrupt()` to run and call `wake()` on an empty waker
         // slot — the wake is lost. Registering first closes the window.
         self.interrupt_waker.register(cx.waker());
-        if self.interrupted.swap(false, Ordering::AcqRel) {
+        if self.interrupted.consume() {
             Poll::Ready(())
         } else {
             Poll::Pending
         }
     }
 
-    /// Clears the interrupt state of the task.
+    /// Acknowledges all interruption publications visible at this call.
+    ///
+    /// Publications that race after the internal snapshot remain pending.
     #[inline]
     pub fn clear_interrupt(&self) {
-        self.interrupted.store(false, Ordering::Release);
+        let snapshot = self.interrupt_snapshot();
+        self.acknowledge_interrupt(snapshot);
     }
 
-    /// Atomically checks and clears the interrupt flag.
+    /// Consumes the interruption publications currently visible to this task.
     ///
     /// Returns `true` if the task was interrupted.
     #[inline]
     pub fn take_interrupt(&self) -> bool {
-        self.interrupted.swap(false, Ordering::AcqRel)
+        self.interrupted.consume()
     }
 
     /// Checks whether the task has been interrupted without clearing
     /// the flag.
     ///
-    /// This is a non-consuming read, unlike [`take_interrupt`]. Use this
+    /// This is a non-consuming read, unlike [`Self::take_interrupt`]. Use this
     /// when the interrupt flag needs to remain set for subsequent
-    /// consumers (e.g., an [`interruptible`] future wrapper).
+    /// consumers (e.g., an [`crate::future::interruptible`] future wrapper).
     #[inline]
     pub fn interrupted(&self) -> bool {
-        self.interrupted.load(Ordering::Acquire)
+        self.interrupted.is_pending()
     }
 
     /// Interrupts the task.
     #[inline]
     pub fn interrupt(&self) {
-        self.interrupted.store(true, Ordering::Release);
+        self.interrupted.publish();
         self.interrupt_waker.wake();
+    }
+
+    /// Captures the interruption publications visible before a safe-point scan.
+    #[inline]
+    pub fn interrupt_snapshot(&self) -> InterruptSnapshot {
+        self.interrupted.snapshot()
+    }
+
+    /// Acknowledges the interruption publications covered by `snapshot`.
+    #[inline]
+    pub fn acknowledge_interrupt(&self, snapshot: InterruptSnapshot) {
+        self.interrupted.acknowledge(snapshot);
     }
 }
 
@@ -360,18 +423,20 @@ impl TaskInner {
     fn new_common(id: TaskId, name: String, kstack: TaskStack) -> Self {
         Self {
             id,
-            name: SpinNoIrq::new(name),
+            name: SpinLock::new(name),
             is_idle: false,
             is_init: false,
             entry: Cell::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
             // By default, the task is allowed to run on all CPUs.
-            cpumask: SpinNoIrq::new(crate::api::cpu_mask_full()),
+            cpumask: SpinLock::new(crate::api::cpu_mask_full()),
             sched_policy: AtomicI32::new(0),
             sched_priority: AtomicI32::new(0),
             in_wait_queue: AtomicBool::new(false),
             #[cfg(feature = "irq")]
             timer_ticket_id: AtomicU64::new(0),
+            #[cfg(feature = "sched-latency")]
+            wake_ts_ns: AtomicU64::new(0),
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),
@@ -381,14 +446,15 @@ impl TaskInner {
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
             force_resched: AtomicBool::new(false),
-            #[cfg(feature = "preempt")]
-            preempt_disable_count: AtomicUsize::new(0),
-            interrupted: AtomicBool::new(false),
+            #[cfg(axtest)]
+            initial_scheduler_frame_consumed: AtomicBool::new(false),
+            interrupted: InterruptState::new(),
             interrupt_waker: AtomicWaker::new(),
             exit_code: AtomicI32::new(0),
             wait_for_exit: WaitQueue::new(),
             kstack,
             ctx: UnsafeCell::new(TaskContext::new()),
+            execution_context: LazyInit::new(),
             #[cfg(feature = "lockdep")]
             held_locks: UnsafeCell::new(HeldLockStack::new()),
             #[cfg(feature = "task-ext")]
@@ -418,7 +484,28 @@ impl TaskInner {
     }
 
     pub(crate) fn into_arc(self) -> AxTaskRef {
-        Arc::new(AxTask::new(self))
+        let task = Arc::new(AxTask::new(self));
+        let owner = NonNull::from(Arc::as_ref(&task));
+        let execution_context = task
+            .execution_context
+            .init_once(TaskExecutionContext::new(owner, task.is_init()));
+        // SAFETY: the header is stored in the Arc-owned task and never moves
+        // after this task becomes visible to a scheduler.
+        let header = unsafe { Pin::new_unchecked(&execution_context.header) };
+        // SAFETY: the Arc is not visible to any scheduler yet, so this is the
+        // only access to its architecture context.
+        unsafe { (*task.ctx_mut_ptr()).set_context_header(header.as_non_null()) };
+        task
+    }
+
+    pub(crate) fn context_header(&self) -> Pin<&ExecutionContextHeader> {
+        let execution_context = self
+            .execution_context
+            .get()
+            .expect("task execution context must be initialized after Arc allocation");
+        // SAFETY: `into_arc` initializes this field only after the containing
+        // scheduler task reaches its permanent Arc allocation.
+        unsafe { Pin::new_unchecked(&execution_context.header) }
     }
 
     /// Returns the current state of the task.
@@ -430,6 +517,21 @@ impl TaskInner {
     #[inline]
     pub(crate) fn set_state(&self, state: TaskState) {
         self.state.store(state as u8, Ordering::Release)
+    }
+
+    /// Record the wake timestamp (ns) of this task's `Blocked -> Ready` transition.
+    #[cfg(feature = "sched-latency")]
+    #[inline]
+    pub(crate) fn set_wake_ts(&self, ts: u64) {
+        self.wake_ts_ns.store(ts, Ordering::Release)
+    }
+
+    /// Take and clear the wake timestamp, returning zero if the task has not
+    /// been woken since it was last scheduled.
+    #[cfg(feature = "sched-latency")]
+    #[inline]
+    pub(crate) fn take_wake_ts(&self) -> u64 {
+        self.wake_ts_ns.swap(0, Ordering::Acquire)
     }
 
     /// Transition the task state from `current_state` to `new_state`,
@@ -522,13 +624,31 @@ impl TaskInner {
     }
 
     #[inline]
-    #[cfg(all(test, feature = "preempt"))]
+    #[cfg(feature = "preempt")]
+    pub(crate) fn preemption_pending(&self) -> bool {
+        self.force_resched_pending() || self.need_resched.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    #[cfg(all(
+        test,
+        feature = "preempt",
+        feature = "smp",
+        feature = "ipi",
+        feature = "host-test"
+    ))]
     pub(crate) fn preempt_pending_for_test(&self) -> bool {
         self.need_resched.load(Ordering::Acquire)
     }
 
     #[inline]
-    #[cfg(all(test, feature = "preempt"))]
+    #[cfg(all(
+        test,
+        feature = "preempt",
+        feature = "smp",
+        feature = "ipi",
+        feature = "host-test"
+    ))]
     pub(crate) fn force_resched_pending_for_test(&self) -> bool {
         self.force_resched_pending()
     }
@@ -542,48 +662,55 @@ impl TaskInner {
     #[inline]
     #[cfg(feature = "preempt")]
     pub(crate) fn preempt_count(&self) -> usize {
-        self.preempt_disable_count.load(Ordering::Acquire)
+        #[cfg(feature = "host-test")]
+        return 0;
+        #[cfg(not(feature = "host-test"))]
+        crate::runtime_preempt::depth()
     }
 
     #[inline]
     #[cfg(feature = "preempt")]
     pub(crate) fn can_preempt(&self, current_disable_count: usize) -> bool {
-        self.preempt_disable_count.load(Ordering::Acquire) == current_disable_count
-    }
-
-    #[inline]
-    #[cfg(feature = "preempt")]
-    pub(crate) fn disable_preempt(&self) {
-        self.preempt_disable_count.fetch_add(1, Ordering::Release);
-    }
-
-    #[inline]
-    #[cfg(feature = "preempt")]
-    pub(crate) fn enable_preempt(&self, resched: bool) {
-        if self.preempt_disable_count.fetch_sub(1, Ordering::Release) == 1 && resched {
-            // If current task is pending to be preempted, do rescheduling.
-            Self::current_check_preempt_pending();
+        #[cfg(feature = "host-test")]
+        return crate::sync::host_preempt_depth() == current_disable_count;
+        #[cfg(not(feature = "host-test"))]
+        {
+            crate::runtime_preempt::depth() == current_disable_count
         }
     }
 
     #[cfg(feature = "preempt")]
-    fn current_check_preempt_pending() {
-        use ax_kernel_guard::NoPreemptIrqSave;
+    pub(crate) fn current_check_preempt_pending() {
+        use crate::sync::PreemptIrqSaveState;
         let curr = crate::current();
         if (curr.force_resched_pending() || curr.need_resched.load(Ordering::Acquire))
             && curr.can_preempt(0)
         {
             // Note: if we want to print log msg during `preempt_resched`, we have to
             // disable preemption here, because the ax-log may cause preemption.
-            let mut rq = crate::current_run_queue::<NoPreemptIrqSave>();
+            let mut rq = crate::current_run_queue::<PreemptIrqSaveState>();
             if curr.take_force_resched_pending() {
-                #[cfg(all(feature = "smp", feature = "ipi"))]
-                crate::run_queue::clear_remote_reschedule_pending_for_current_cpu();
                 rq.force_resched()
             } else if curr.need_resched.load(Ordering::Acquire) {
                 rq.preempt_resched()
             }
         }
+    }
+
+    #[cfg(axtest)]
+    pub(crate) fn record_initial_scheduler_frame_consumed_for_test(&self) {
+        assert!(
+            !self
+                .initial_scheduler_frame_consumed
+                .swap(true, Ordering::AcqRel),
+            "initial scheduler frame was consumed twice by one task"
+        );
+    }
+
+    #[cfg(axtest)]
+    pub(crate) fn initial_scheduler_frame_consumed_for_test(&self) -> bool {
+        self.initial_scheduler_frame_consumed
+            .load(Ordering::Acquire)
     }
 
     /// Notify all tasks that join on this task.
@@ -863,10 +990,8 @@ fn flush_stack_guard_tlb(vaddr: VirtAddr) {
 
 #[cfg(all(feature = "stack-guard-page", feature = "smp", feature = "ipi"))]
 fn flush_stack_guard_tlb(vaddr: VirtAddr) {
-    let _guard = ax_kernel_guard::NoPreempt::new();
+    let _guard = crate::sync::PreemptGuard::new();
     let current_cpu = ax_hal::percpu::this_cpu_id();
-    let ack_count = Arc::new(AtomicUsize::new(0));
-    let mut remote_cpu_count = 0;
 
     core::sync::atomic::fence(Ordering::SeqCst);
 
@@ -875,31 +1000,26 @@ fn flush_stack_guard_tlb(vaddr: VirtAddr) {
             continue;
         }
 
-        remote_cpu_count += 1;
-        let ack_count = ack_count.clone();
-        ax_ipi::run_on_cpu(cpu_id, move || {
-            ax_hal::asm::flush_tlb(Some(vaddr));
-            ack_count.fetch_add(1, Ordering::Release);
+        unsafe fn flush_on_target(argument: *mut ()) {
+            let address = unsafe { &*(argument as *const VirtAddr) };
+            ax_hal::asm::flush_tlb(Some(*address));
+        }
+
+        // SAFETY: call_on_cpu is synchronous, so the stack-borrowed address
+        // remains valid until the target finishes the hard-IRQ-safe TLB flush.
+        unsafe {
+            ax_ipi::call_on_cpu(
+                ax_hal::irq::CpuId(cpu_id),
+                flush_on_target,
+                core::ptr::from_ref(&vaddr).cast_mut().cast(),
+            )
+        }
+        .unwrap_or_else(|error| {
+            panic!("failed to flush stack guard TLB on CPU {cpu_id}: {error:?}")
         });
     }
 
     ax_hal::asm::flush_tlb(Some(vaddr));
-    if remote_cpu_count == 0 {
-        return;
-    }
-
-    const MAX_WAIT_NS: u64 = 5 * ax_hal::time::NANOS_PER_SEC;
-    let start = ax_hal::time::monotonic_time_nanos();
-    while ack_count.load(Ordering::Acquire) != remote_cpu_count {
-        core::hint::spin_loop();
-        if ax_hal::time::monotonic_time_nanos() - start > MAX_WAIT_NS {
-            let acked = ack_count.load(Ordering::Acquire);
-            panic!(
-                "task stack guard page TLB shootdown timeout: CPU {current_cpu} got \
-                 {acked}/{remote_cpu_count} ack(s) for vaddr={vaddr:#x}"
-            );
-        }
-    }
 }
 
 #[cfg(feature = "stack-guard-page")]
@@ -986,12 +1106,20 @@ pub struct CurrentTask(ManuallyDrop<AxTaskRef>);
 
 impl CurrentTask {
     pub(crate) fn try_get() -> Option<Self> {
-        let ptr: *const super::AxTask = ax_hal::percpu::current_task_ptr();
-        if !ptr.is_null() {
-            Some(Self(unsafe { ManuallyDrop::new(AxTaskRef::from_raw(ptr)) }))
-        } else {
-            None
+        // SAFETY: the scheduler keeps one raw strong reference for the current
+        // task until `set_current` transfers ownership to the next task. This
+        // bootstrap read is also used by the preemption guard implementation,
+        // so it cannot require that same guard to have been acquired already.
+        let header = NonNull::new(unsafe { ax_hal::percpu::current_context_raw() }.cast_mut())?;
+        if ax_hal::percpu::is_permanent_boot_context(header) {
+            return None;
         }
+        // SAFETY: scheduler publication accepts only the offset-zero header of
+        // a live task wrapper and retains a raw strong reference while current.
+        let context = unsafe { TaskExecutionContext::from_header(header) };
+        Some(Self(unsafe {
+            ManuallyDrop::new(AxTaskRef::from_raw(context.owner.as_ptr()))
+        }))
     }
 
     pub(crate) fn get() -> Self {
@@ -1011,23 +1139,41 @@ impl CurrentTask {
 
     pub(crate) unsafe fn init_current(init_task: AxTaskRef) {
         assert!(init_task.is_init());
-        #[cfg(feature = "tls")]
+        // SAFETY: scheduler initialization runs on an offline CPU before any
+        // task switch or migration can occur.
+        let header = init_task.context_header();
         unsafe {
-            ax_hal::asm::write_thread_pointer(init_task.tls.tls_ptr() as usize)
-        };
-        let ptr = Arc::into_raw(init_task);
-        unsafe {
-            ax_hal::percpu::set_current_task_ptr(ptr);
+            ax_hal::percpu::with_cpu_pin(|pin| {
+                #[cfg(feature = "tls")]
+                ax_hal::percpu::install_bootstrap_kernel_tls(
+                    pin,
+                    KernelTlsBase::new(init_task.tls.tls_ptr() as usize),
+                );
+                ax_hal::percpu::install_bootstrap_context(pin, header)
+            })
         }
+        .expect("CPU-local area must precede task initialization")
+        .expect("bootstrap current-context state must install");
+        let _ = Arc::into_raw(init_task);
     }
 
     pub(crate) unsafe fn set_current(prev: Self, next: AxTaskRef) {
         let Self(arc) = prev;
         ManuallyDrop::into_inner(arc); // `call Arc::drop()` to decrease prev task reference count.
-        let ptr = Arc::into_raw(next);
-        unsafe {
-            ax_hal::percpu::set_current_task_ptr(ptr);
-        }
+        let _ = Arc::into_raw(next);
+    }
+}
+
+#[cfg(all(test, feature = "host-test", feature = "multitask"))]
+mod current_task_tests {
+    #[test]
+    fn permanent_boot_context_is_not_a_published_task() {
+        std::thread::spawn(|| {
+            ax_hal::percpu::initialize_host_test_cpu();
+            assert!(super::CurrentTask::try_get().is_none());
+        })
+        .join()
+        .expect("boot-context probe panicked");
     }
 }
 
@@ -1040,11 +1186,14 @@ impl Deref for CurrentTask {
 }
 
 extern "C" fn task_entry() -> ! {
-    #[cfg(feature = "smp")]
     unsafe {
         // Clear the prev task on CPU before running the task entry function.
         crate::run_queue::clear_prev_task_on_cpu();
     }
+    // A CPU-owned preemption word carries the switch guard across the raw
+    // transfer. Unlike a resumed task, a new task has no suspended caller to
+    // finish that guard, so its first-entry tail completes the handoff here.
+    crate::runtime_preempt::finish_initial_context_switch();
     // Enable irq (if feature "irq" is enabled) before running the task entry function.
     #[cfg(all(feature = "irq", not(feature = "host-test")))]
     ax_hal::asm::enable_irqs();
@@ -1053,4 +1202,95 @@ extern "C" fn task_entry() -> ! {
         entry()
     }
     crate::exit(0);
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    fn task_id_and_state_hold_for_test() -> bool {
+        // Test TaskId
+        let id1 = TaskId(1);
+        let id2 = TaskId(2);
+        assert!(id1 != id2);
+        assert!(id1 == id1);
+
+        // Test TaskState variants
+        assert!(TaskState::Running as u8 == 1);
+        assert!(TaskState::Ready as u8 == 2);
+
+        true
+    }
+
+    fn task_constants_hold_for_test() -> bool {
+        // Test TASK_STACK_ALIGN constant
+        assert_eq!(TASK_STACK_ALIGN, 16);
+
+        // Test STACK_END_MAGIC for 64-bit
+        #[cfg(target_pointer_width = "64")]
+        assert!(STACK_END_MAGIC == 0x57AC_CE11_57AC_CE11usize);
+
+        true
+    }
+
+    fn task_id_operations_hold_for_test() -> bool {
+        // Test TaskId operations
+        let id1 = TaskId(100);
+        let id2 = TaskId(200);
+
+        // Test equality
+        assert!(id1 == id1);
+        assert!(id1 != id2);
+
+        // Test clone
+        let id3 = id1.clone();
+        assert!(id1 == id3);
+
+        // Test copy
+        let id4 = id1;
+        assert!(id4 == id1);
+
+        true
+    }
+
+    fn task_state_all_variants_hold_for_test() -> bool {
+        // Test all TaskState variants
+        let running = TaskState::Running;
+        let ready = TaskState::Ready;
+        let blocked = TaskState::Blocked;
+        let exited = TaskState::Exited;
+
+        // Verify all are different
+        assert!(core::mem::discriminant(&running) != core::mem::discriminant(&ready));
+        assert!(core::mem::discriminant(&ready) != core::mem::discriminant(&blocked));
+        assert!(core::mem::discriminant(&blocked) != core::mem::discriminant(&exited));
+
+        // Verify ordinal values
+        assert!(running as u8 == 1);
+        assert!(ready as u8 == 2);
+        assert!(blocked as u8 == 3);
+        assert!(exited as u8 == 4);
+
+        true
+    }
+
+    #[test]
+    fn task_id_and_state_hold() {
+        assert!(task_id_and_state_hold_for_test());
+    }
+
+    #[test]
+    fn task_constants_hold() {
+        assert!(task_constants_hold_for_test());
+    }
+
+    #[test]
+    fn task_id_operations_hold() {
+        assert!(task_id_operations_hold_for_test());
+    }
+
+    #[test]
+    fn task_state_all_variants_hold() {
+        assert!(task_state_all_variants_hold_for_test());
+    }
 }

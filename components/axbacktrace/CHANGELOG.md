@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9](https://github.com/rcore-os/tgoskits/compare/axbacktrace-v0.4.8...axbacktrace-v0.4.9) - 2026-08-20
+
+### Fixed
+
+- *(axtask)* preserve scheduler-frame ownership across switches ([#2101](https://github.com/rcore-os/tgoskits/pull/2101))
+
+### Other
+
+- *(axtest)* standardize Cargo and QEMU test flow ([#2088](https://github.com/rcore-os/tgoskits/pull/2088))
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+## [0.4.8](https://github.com/rcore-os/tgoskits/compare/axbacktrace-v0.4.7...axbacktrace-v0.4.8) - 2026-08-09
+
+### Other
+
+- updated the following local packages: axtest
+
+## [0.4.7](https://github.com/rcore-os/tgoskits/compare/axbacktrace-v0.4.6...axbacktrace-v0.4.7) - 2026-08-03
+
+### Other
+
+- enhance axtest coverage for various starry-kernel contracts ([#1674](https://github.com/rcore-os/tgoskits/pull/1674))
+
+## [0.4.6](https://github.com/rcore-os/tgoskits/compare/axbacktrace-v0.4.5...axbacktrace-v0.4.6) - 2026-07-23
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.4.5](https://github.com/rcore-os/tgoskits/compare/axbacktrace-v0.4.4...axbacktrace-v0.4.5) - 2026-07-07
 
 ### Other

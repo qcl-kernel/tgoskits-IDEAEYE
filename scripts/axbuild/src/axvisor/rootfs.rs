@@ -11,12 +11,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, bail};
 use ostool::{build::config::Cargo, run::qemu::QemuConfig};
 use serde::Deserialize;
 
 use super::{Axvisor, build};
-use crate::{context::ResolvedAxvisorRequest, rootfs, test::qemu as qemu_test};
+use crate::{context::ResolvedAxvisorRequest, rootfs};
 
 #[derive(Deserialize)]
 struct VmRootfsProbe {
@@ -46,102 +46,31 @@ pub(super) async fn qemu(axvisor: &mut Axvisor, args: super::ArgsQemu) -> anyhow
             )
         })
         .transpose()?;
+    let mut cargo = build::load_cargo_config(&request)?;
+    request.vmconfigs = build::vmconfigs_from_cargo(&cargo);
     ensure_qemu_rootfs_ready(
         &request,
         axvisor.app.workspace_root(),
         explicit_rootfs.as_deref(),
     )
     .await?;
-    prepare_loongarch_linux_vmconfigs(
-        &mut request,
-        axvisor.app.workspace_root(),
-        explicit_rootfs.as_deref(),
-    )?;
-    let cargo = build::load_cargo_config(&request)?;
     let qemu =
         load_patched_qemu_config(axvisor, &request, &cargo, explicit_rootfs.as_deref()).await?;
+    cargo.to_bin = qemu_to_bin_requested(&qemu)?;
     axvisor
         .app
         .qemu(cargo, request.build_info_path, Some(qemu))
         .await
 }
 
-pub(crate) fn prepare_loongarch_linux_vmconfigs(
-    request: &mut ResolvedAxvisorRequest,
-    workspace_root: &Path,
-    _explicit_rootfs: Option<&Path>,
-) -> anyhow::Result<()> {
-    if request.arch != "loongarch64" || request.vmconfigs.is_empty() {
-        return Ok(());
-    }
-
-    let firmware_path = loongarch_uefi_firmware_path(workspace_root).ok_or_else(|| {
-        anyhow!("LoongArch UEFI firmware image was not found; expected ostool OVMF code.fd")
-    })?;
-    let out_dir = workspace_root.join("tmp/axbuild/axvisor/loongarch64");
-    let mut prepared_vmconfigs = Vec::with_capacity(request.vmconfigs.len());
-
-    for vmconfig in &request.vmconfigs {
-        let content = fs::read_to_string(vmconfig)
-            .map_err(|e| anyhow!("failed to read vm config {}: {e}", vmconfig.display()))?;
-        let value: toml::Value = toml::from_str(&content)
-            .map_err(|e| anyhow!("failed to parse vm config {}: {e}", vmconfig.display()))?;
-        let guest_kernel = value
-            .get("kernel")
-            .and_then(|kernel| kernel.get("kernel_path"))
-            .and_then(|path| path.as_str());
-
-        if guest_kernel != Some("/guest/linux/linux-qemu") {
-            prepared_vmconfigs.push(vmconfig.clone());
-            continue;
-        }
-
-        let prepared_vmconfig = out_dir.join(
-            vmconfig
-                .file_name()
-                .unwrap_or_else(|| std::ffi::OsStr::new("linux-rootfs-smp1.toml")),
+fn qemu_to_bin_requested(qemu: &QemuConfig) -> anyhow::Result<bool> {
+    if qemu.uefi && !qemu.to_bin {
+        bail!(
+            "QEMU config enables UEFI but does not request `to_bin = true`; set `to_bin = true` \
+             explicitly"
         );
-        fs::create_dir_all(&out_dir)
-            .with_context(|| format!("failed to create {}", out_dir.display()))?;
-        let patched = replace_toml_string_value(
-            &content,
-            "uefi_firmware_path",
-            &firmware_path.display().to_string(),
-        );
-        fs::write(&prepared_vmconfig, patched)
-            .with_context(|| format!("failed to write {}", prepared_vmconfig.display()))?;
-        prepared_vmconfigs.push(prepared_vmconfig);
     }
-
-    request.vmconfigs = prepared_vmconfigs;
-    Ok(())
-}
-
-fn loongarch_uefi_firmware_path(workspace_root: &Path) -> Option<PathBuf> {
-    [
-        PathBuf::from("/tmp/ostool/ovmf/loongarch64/code.fd"),
-        workspace_root.join("tmp/ostool/ovmf/loongarch64/code.fd"),
-        workspace_root.join("tmp/loongarch-uefi-stage1/assets/qemu-binary/QEMU_EFI.fd"),
-    ]
-    .into_iter()
-    .find(|path| path.exists())
-}
-
-fn replace_toml_string_value(content: &str, key: &str, value: &str) -> String {
-    let prefix = format!("{key} = ");
-    content
-        .lines()
-        .map(|line| {
-            if line.trim_start().starts_with(&prefix) {
-                let indent_len = line.len() - line.trim_start().len();
-                format!("{}{}\"{}\"", &line[..indent_len], prefix, value)
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
+    Ok(qemu.to_bin)
 }
 
 pub(super) async fn load_patched_qemu_config(
@@ -163,7 +92,6 @@ pub(super) async fn load_patched_qemu_config(
         axvisor.app.workspace_root(),
         explicit_rootfs,
     )?;
-    qemu_test::apply_dynamic_platform_qemu_boot(&mut qemu, cargo);
     Ok(qemu)
 }
 
@@ -190,8 +118,11 @@ pub(crate) fn patch_qemu_rootfs(
     explicit_rootfs: Option<&Path>,
 ) -> anyhow::Result<()> {
     let rootfs_path = qemu_rootfs_path(request, workspace_root, explicit_rootfs)?;
-    patch_qemu_rootfs_path(config, &rootfs_path);
-    Ok(())
+    patch_qemu_rootfs_path(
+        config,
+        &rootfs_path,
+        rootfs::qemu::RootfsWritePolicy::Persist,
+    )
 }
 
 /// Resolves the rootfs path selected for an Axvisor QEMU request.
@@ -212,12 +143,19 @@ pub(crate) fn qemu_rootfs_path(
 }
 
 /// Patches a QEMU config with a concrete Axvisor rootfs path.
-pub(crate) fn patch_qemu_rootfs_path(config: &mut QemuConfig, rootfs_path: &Path) {
+pub(crate) fn patch_qemu_rootfs_path(
+    config: &mut QemuConfig,
+    rootfs_path: &Path,
+    write_policy: rootfs::qemu::RootfsWritePolicy,
+) -> anyhow::Result<()> {
     rootfs::qemu::patch_rootfs(
         config,
         rootfs_path,
-        rootfs::qemu::RootfsPatchMode::ReplaceDriveOnly,
-    );
+        rootfs::qemu::RootfsPatchOptions {
+            mode: rootfs::qemu::RootfsPatchMode::ReplaceDriveOnly,
+            write_policy,
+        },
+    )
 }
 
 /// Returns the managed rootfs path Axvisor should prepare, if any.
@@ -251,9 +189,16 @@ pub(crate) fn infer_rootfs_path(vmconfigs: &[PathBuf]) -> anyhow::Result<Option<
         let Some(kernel_path) = probe.kernel.and_then(|kernel| kernel.kernel_path) else {
             continue;
         };
-        let rootfs_path = Path::new(&kernel_path)
-            .parent()
-            .map(|dir| dir.join("rootfs.img"));
+        let kernel_path = Path::new(&kernel_path);
+        let kernel_path = if kernel_path.is_absolute() {
+            kernel_path.to_path_buf()
+        } else {
+            vmconfig
+                .parent()
+                .map(|parent| parent.join(kernel_path))
+                .unwrap_or_else(|| kernel_path.to_path_buf())
+        };
+        let rootfs_path = kernel_path.parent().map(|dir| dir.join("rootfs.img"));
         if let Some(rootfs_path) = rootfs_path
             && rootfs_path.exists()
         {
@@ -270,15 +215,14 @@ mod tests {
     use super::*;
 
     fn managed_rootfs_path_for_test(root: &Path, image_name: &str) -> PathBuf {
-        root.join(".tgos-images").join(image_name).join(image_name)
+        root.join(".tgos-images").join(image_name)
     }
 
     fn write_test_image_config(root: &Path) {
         let config = crate::image::config::ImageConfig {
-            local_storage: root.join(".tgos-images"),
             registry: crate::image::config::DEFAULT_REGISTRY_URL.to_string(),
-            auto_sync: true,
-            auto_sync_threshold: 60,
+            download_dir: root.join(".tgos-downloads"),
+            extract_dir: root.join(".tgos-images"),
         };
         crate::image::config::ImageConfig::write_config(root, &config).unwrap();
     }
@@ -307,13 +251,10 @@ mod tests {
         let vmconfig = root.path().join("vm.toml");
         fs::write(
             &vmconfig,
-            format!(
-                r#"
+            r#"
 [kernel]
-kernel_path = "{}"
+kernel_path = "image/qemu-aarch64"
 "#,
-                image_dir.join("qemu-aarch64").display()
-            ),
         )
         .unwrap();
 
@@ -381,7 +322,10 @@ kernel_path = "{}"
         .unwrap();
 
         let mut qemu = QemuConfig {
-            args: vec!["id=disk0,if=none,format=raw,file=/old/tmp/rootfs.img".to_string()],
+            args: vec![
+                "-drive".to_string(),
+                "id=disk0,if=none,format=raw,file=/old/tmp/rootfs.img".to_string(),
+            ],
             ..Default::default()
         };
         patch_qemu_rootfs(
@@ -394,10 +338,10 @@ kernel_path = "{}"
 
         assert_eq!(
             qemu.args,
-            vec![format!(
-                "id=disk0,if=none,format=raw,file={}",
-                rootfs_path.display()
-            )]
+            vec![
+                "-drive".to_string(),
+                format!("id=disk0,if=none,format=raw,file={}", rootfs_path.display())
+            ]
         );
     }
 
@@ -407,7 +351,10 @@ kernel_path = "{}"
         write_test_image_config(root.path());
         let rootfs = managed_rootfs_path_for_test(root.path(), "rootfs-aarch64-alpine.img");
         let mut qemu = QemuConfig {
-            args: vec!["id=disk0,if=none,format=raw,file=/old/tmp/rootfs.img".to_string()],
+            args: vec![
+                "-drive".to_string(),
+                "id=disk0,if=none,format=raw,file=/old/tmp/rootfs.img".to_string(),
+            ],
             ..Default::default()
         };
 
@@ -415,10 +362,10 @@ kernel_path = "{}"
 
         assert_eq!(
             qemu.args,
-            vec![format!(
-                "id=disk0,if=none,format=raw,file={}",
-                rootfs.display()
-            )]
+            vec![
+                "-drive".to_string(),
+                format!("id=disk0,if=none,format=raw,file={}", rootfs.display())
+            ]
         );
     }
 
@@ -430,9 +377,9 @@ kernel_path = "{}"
         let mut qemu = QemuConfig {
             args: vec![
                 "-device".to_string(),
-                "virtio-blk-device,drive=disk0".to_string(),
+                "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65".to_string(),
                 "-append".to_string(),
-                "root=/dev/vda rw init=/bin/sh".to_string(),
+                "root=/dev/nvme0n1 rw init=/bin/sh".to_string(),
             ],
             ..Default::default()
         };
@@ -443,11 +390,11 @@ kernel_path = "{}"
             qemu.args,
             vec![
                 "-device".to_string(),
-                "virtio-blk-device,drive=disk0".to_string(),
+                "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65".to_string(),
                 "-drive".to_string(),
                 format!("id=disk0,if=none,format=raw,file={}", rootfs.display()),
                 "-append".to_string(),
-                "root=/dev/vda rw init=/bin/sh".to_string(),
+                "root=/dev/nvme0n1 rw init=/bin/sh".to_string(),
             ]
         );
     }
@@ -515,5 +462,41 @@ kernel_path = "{}"
             .unwrap(),
             Some(explicit)
         );
+    }
+
+    #[test]
+    fn qemu_uefi_without_to_bin_is_rejected() {
+        let qemu = QemuConfig {
+            uefi: true,
+            to_bin: false,
+            ..Default::default()
+        };
+
+        assert!(qemu_to_bin_requested(&qemu).is_err());
+    }
+
+    #[test]
+    fn axvisor_host_rootfs_configs_use_nvme_device_names() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let configs = [
+            "test-suit/axvisor/normal/qemu/smoke/qemu-aarch64.toml",
+            "test-suit/axvisor/normal/qemu/smoke/qemu-riscv64.toml",
+            "test-suit/axvisor/normal/qemu/build-loongarch64-unknown-none-softfloat.toml",
+            "os/axvisor/configs/qemu/qemu-aarch64.toml",
+            "os/axvisor/configs/qemu/qemu-riscv64.toml",
+            "os/axvisor/configs/board/qemu-loongarch64.toml",
+        ];
+
+        for relative in configs {
+            let config = fs::read_to_string(workspace_root.join(relative)).unwrap();
+            assert!(
+                !config.contains("root=/dev/vda"),
+                "{relative} still names the removed VirtIO block root device"
+            );
+            assert!(
+                config.contains("ax-driver/nvme") || config.contains("\"nvme,drive=disk0"),
+                "{relative} does not enable or attach NVMe"
+            );
+        }
     }
 }

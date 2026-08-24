@@ -1,141 +1,146 @@
 ---
 name: review-single-pr
-description: Review one specified GitHub pull request in this tgoskits repository. Use when the user names a PR number or URL and asks to review, re-review, compare with Linux/POSIX/RFC/VirtIO semantics, check duplicate functionality or related open PRs, verify required tests and their placement/discovery/execution, validate Starry or ArceOS app/tool workflows that CI may miss, repair safe merge conflicts, run focused validation, leave Chinese inline review comments, approve, request changes, or assign reviewers after review.
+description: 审查本 tgoskits 仓库中一个指定的 GitHub 拉取请求。适用于用户指定 PR 编号或网址，要求审查、复审、先检查当前精确提交的 CI 并复用其验证证据、暂缓仍有相关 CI 运行的 PR、对照 Linux/POSIX/RFC/VirtIO 语义、检查重复实现或相关开放 PR、建立并关闭 PR 专属审查清单、验证测试位置与发现和执行链路、修复安全的合并冲突、执行 CI 未覆盖的针对性验证、提交面向初学者的中文行内评论、批准或请求修改，以及审查后依据 .github/MAINTAINERS.md 推荐并分配审查人。
 ---
 
-# Review Single PR
+# 审查单个 PR
 
-## Normative Use
+## 强制要求
 
-This skill is a normative review specification, not a suggestion list. When it triggers, read the entire `SKILL.md` before deciding the review outcome, then follow every applicable requirement unless a higher-priority system or developer instruction conflicts.
+将本技能视为强制性审查规范，而不是建议清单。触发后完整阅读本文件，再作出审查结论；除非更高优先级指令冲突，否则执行所有适用要求。
 
-Do not submit `APPROVE`, `REQUEST_CHANGES`, a no-submit summary, or any PR-facing comment from only the frontmatter, title, partial sections, memory, or a previous review. If context or time pressure prevents reading the full skill, state that limitation and do not claim a complete `review-single-pr` review.
+判断代码质量、可维护性或可合入状态前，完整阅读 `docs/guideline/code-quality.md`。PR 新增或扩展用户可见行为、共享或公共接口、软件包、子系统、平台或硬件能力时，完整阅读 `docs/guideline/feature-development.md`；按语义而不是标题判断是否适用。仅在语义适用时读取其他领域规范。任何改动或声明若影响 StarryOS 系统调用或 Linux ABI，包括任务、虚拟文件系统、命名空间、信号、套接字、凭据、内存管理等间接辅助代码，完整阅读 `docs/guideline/starry_syscall.md`。不适用时，在审查清单中记录具体理由。上下文被压缩、从摘要恢复或无法确信记得规范时，重新完整阅读，不能依赖记忆或旧的局部阅读。
 
-After reading the full skill, create a review todo/checklist before deciding or submitting any outcome. The checklist must cover all applicable merge-readiness requirements from this skill, including PR metadata and intake, review threads and CI, worktree setup, merge-conflict handling when applicable, review focus, required test coverage and test placement/discovery, duplicate and overlap analysis, validation, blocking findings, submission rules, reviewer assignment, and cleanup. Verify each item one by one as satisfied, not applicable with a concrete reason, or blocking with evidence; do not collapse the checklist into a generic "tests passed" statement.
+没有完整阅读本技能和所有适用规范时，不得提交 `APPROVE`、`REQUEST_CHANGES`、不提交审查的总结或任何面向 PR 的评论。唯一例外是“当前提交 CI 前置门禁”发现相关 CI 仍在运行时，只向用户报告暂缓状态；该状态报告不是审查结论，也不得写入 PR。规则重叠时采用更严格者；跳过要求时记录具体理由和证据。
 
-When requirements overlap, apply the stricter rule. If skipping a requirement is necessary because it is inapplicable or impossible, record the concrete reason and evidence in the review body or user summary.
+输出任何审查文本前，先执行“中文审查文本规范”。要求修改的评论先复制“为什么需要改动、改动收益、改动前逻辑（基准分支）、改动后逻辑（当前 PR）、触发场景与证据、问题级别、建议修改方式”七个粗体 Markdown 标题再填写；缺少任一标题、标题下为空或用连续段落代替标题时，禁止输出或提交，必须重写。总审查正文先复制前四个二级 Markdown 标题再填写；缺少任一标题时同样禁止输出或提交。
 
-## Goal
+## 审查清单门禁
 
-Perform a focused review of exactly one PR, using an isolated worktree and local validation before submitting a GitHub review. The review must also decide whether the PR duplicates existing base-branch functionality or overlaps with other open PRs. After the review decision is submitted, assign suitable human reviewers from the project reviewer direction table when the PR still needs domain follow-up. The normal outcome is either `APPROVE` when no blocking issue remains, or `REQUEST_CHANGES` with Chinese inline comments when the PR has correctness, standards, duplication, test, or CI coverage problems.
+在线 PR 在详细判断、完整加载领域规范、创建清单、建立工作树或运行本地命令前，先按“当前提交 CI 前置门禁”读取最少的当前提交、变更路径和检查状态。相关 CI 仍在运行时立即暂缓，不创建 PR 专属清单，也不继续处理该 PR。
 
-This skill is the authoritative single-PR workflow used by `review-open-prs`: do not fully review all open PRs, but always inspect enough related open PR context to classify duplicate, overlapping, superseded, or conflicting work.
+CI 门禁通过后，读取足以识别审查范围的 PR 描述、提交记录和语义范围，然后完整读取本技能、仓库指令、必读规范以及规划验证所需的应用文档或操作手册。
 
-## System Skill Priority
+完成这些读取后，立即通过可用的任务清单工具创建用户可见、PR 专属的完整清单，并等待调用成功。持续使用同一个工具，最多一个项目处于进行中；发现新范围时先追加清单再调查。工具返回空结果但未报错时视为成功。只有工具不可用或确认失败时才改用可见的 Markdown 清单，并说明原因。
 
-For GitHub operations, follow the system GitHub plugin skills first:
+每个清单项写明具体受影响范围和预期证据，覆盖：当前提交信息、既有审查讨论、CI 覆盖台账、工作树、必要时的冲突、每个受影响模块及审查视角、代码质量基线、功能开发规范适用性、领域语义、测试的位置/构建/发现/选择/执行、重复与重叠分析、CI 未覆盖的精确验证命令、阻塞问题与评论、当前提交刷新、审查提交、审查人分配和清理。每个受影响应用及每个新增或迁移测试都建立独立证据项目；已被当前提交成功 CI 精确覆盖的项目以检查名、任务、命令、架构或配置和后置条件关闭为“不需要重复本地验证”。禁止使用“审查代码”“运行测试”之类泛化项目。
 
-- Use `github:github` as the default source for repository orientation, PR metadata, patch inspection, comments, labels, reactions, and connector-first behavior.
-- Use `github:gh-address-comments` when unresolved review threads, requested changes, inline review context, line anchors, or thread resolution state matter.
-- Use `github:gh-fix-ci` when the review depends on failing GitHub Actions checks or logs.
+提交任何审查结论前逐项审计，只能以“有证据地完成”“给出具体理由的不适用”或“有证据的阻塞结论”关闭。阻塞结论会完成调查项，但必须进入中文审查文本和最终决定。任何必需项仍为 `pending`、不可验证或缺少证据时禁止 `APPROVE`；若缺口由 PR 引入则提交 `REQUEST_CHANGES`，若外部审查系统限制阻止完成则明确不提交审查。提交审查、分配审查人和清理后，再做一次最终清单审计，向用户汇报完成项、不适用项、阻塞项和未完成项。
 
-Prefer the GitHub MCP/connector for structured PR data. Use local `git` for fetch, detached worktrees, local diffs, and validation. Use `gh` only for connector gaps such as current-branch PR discovery, GraphQL review-thread state, Actions logs, or review submission when the connector cannot preserve the required inline review anchors.
+## 离线基准模式
 
-## Intake
+仅当以精确参数 `offline-benchmark` 调用，且仓库存在 `.agent-review-context/reviewer.md` 时启用。否则执行正常在线流程。
 
-1. Follow `github:github` to resolve repository identity, current user, PR number or URL, title, body, author, base/head refs, `headRefOid`, draft state, merge state, changed files, patch context, commit messages, existing reviews/comments, and available checks.
-2. If the PR is authored by the current GitHub user, say so and ask before submitting a formal review.
-3. Include draft PRs unless the user explicitly says to skip drafts.
-4. Keep connector state and local checkout state aligned before creating the worktree.
+以 `bench-base..HEAD` 为唯一被审变更。完整阅读本技能、`AGENTS.md`、`docs/guideline/code-quality.md`，按需读取 `docs/guideline/feature-development.md` 和领域规范，并读取离线约定与输出格式。应用本技能的审查重点、测试质量、阻塞问题、硬件/ABI、安全与健全性、可维护性和文档要求。
 
-Fallback only when the GitHub MCP/connector cannot provide the needed data:
+离线环境没有真实 PR：PR 元数据、审查讨论、远端 CI、开放 PR 搜索、工作树、冲突修复、联网语义研究、命令验证、GitHub 提交、审查人分配和远端清理均标为不适用。禁止推断 PR 编号、访问仓库外路径或网络、修改文件、创建提交或分支、运行构建或测试。只使用只读仓库检查和测试框架允许的 Git 历史与差异命令。
 
-   ```bash
-   gh auth status
-   gh repo view --json nameWithOwner,defaultBranchRef,url
-   gh pr view <pr> --json number,title,body,author,baseRefName,headRefName,headRefOid,headRepositoryOwner,isDraft,mergeStateStatus,maintainerCanModify,reviewDecision,url,commits
-   gh pr diff <pr> --patch --color=never
-   gh pr checks <pr> --watch=false
-   gh api "repos/<owner>/<repo>/pulls/<pr>/reviews?per_page=100"
-   gh api "repos/<owner>/<repo>/pulls/<pr>/files?per_page=100"
-   ```
+只返回 `.agent-review-context/review.schema.json` 要求的 JSON。问题必须由 `bench-base..HEAD` 引入并锚定 `HEAD` 侧变更行；没有问题时返回空 `findings`。禁止提交或起草任何面向 GitHub 的审查文本。仍须创建并审计清单；若无任务清单工具，在内部跟踪，不能破坏只返回 JSON 的约定。
 
-## Review Threads And CI
+## 目标与工具优先级
 
-For prior requested changes, unresolved review conversations, inline review locations, or resolution state, follow `github:gh-address-comments`: use the GitHub app/MCP for PR metadata and patch context, and use its GraphQL-based `gh` fallback only when thread-level fields such as `isResolved`, `isOutdated`, `diffSide`, or exact line anchors are required. Do not treat flat connector comments as a complete representation of review-thread state.
+只审查指定的一个 PR，先复用当前精确提交的 CI 证据，再在隔离工作树中完成代码分析和 CI 未覆盖的必要本地验证；同时判断它是否重复基准分支已有功能、与其他开放 PR 重叠、冲突或已被取代。没有阻塞问题时提交 `APPROVE`；存在正确性、规范、重复、测试或 CI 覆盖问题时，以中文行内评论提交 `REQUEST_CHANGES`。审查完成后，仅在仍需领域跟进时依据 `.github/MAINTAINERS.md` 分配合适的人类审查人。
 
-When using GraphQL directly, request `reviewThreads { nodes { id isResolved isOutdated path line diffSide comments(first: 100) { nodes { author { login } body createdAt } } } }`. Detached worktrees cannot rely on current-branch PR inference, so pass `<owner>`, `<repo>`, and `<pr>` explicitly to helpers.
+本技能是 `review-open-prs` 的单 PR 权威流程。不要完整审查所有开放 PR，但读取足够的相关 PR 上下文来分类重复和重叠。
 
-Always inspect unresolved review conversations from previous reviews. If the concrete issue is fixed in the current PR head, resolve the conversation before finishing the review. Keep threads open when the fix is partial, the test is not wired into the runner, or the comment is still behaviorally valid. Resolving old threads does not imply approval if new blocking issues remain.
+GitHub 操作优先遵循系统技能：
 
-Resolve fixed conversations with the review-thread API, then fetch threads again and confirm every resolved thread reports `isResolved=true`:
+- `github:github`：仓库定位、PR 元数据、补丁、评论、标签、反应和连接器优先行为；
+- `github:gh-address-comments`：未解决讨论、请求修改、行内上下文、锚点和讨论解决状态；
+- `github:gh-fix-ci`：失败的 GitHub Actions 检查和日志。
+
+优先使用 GitHub 连接器获取结构化数据，本地 `git` 用于获取、工作树、差异和验证；只有连接器无法满足当前分支发现、GraphQL 讨论、Actions 日志或带锚点提交等需求时才使用 `gh`。
+
+## PR 信息收集
+
+1. 通过 `github:github` 获取仓库身份、当前用户、PR 编号或网址、标题、描述、作者、基准与来源分支、`headRefOid`、草稿状态、合并状态、变更文件、补丁、提交、既有审查或评论和检查结果。
+2. PR 作者是当前 GitHub 用户时，提交正式审查前先征询用户。
+3. 除非用户明确排除，否则包含草稿 PR。
+4. 创建工作树前确保连接器状态和本地检出内容一致。
+
+连接器缺少必要数据时才回退：
 
 ```bash
-gh api graphql \
-  -f query='mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}' \
-  -f threadId=<thread-id>
+gh auth status
+gh repo view --json nameWithOwner,defaultBranchRef,url
+gh pr view <pr> --json number,title,body,author,baseRefName,headRefName,headRefOid,headRepositoryOwner,isDraft,mergeStateStatus,maintainerCanModify,reviewDecision,url,commits
+gh pr diff <pr> --patch --color=never
+gh pr checks <pr> --watch=false
+gh api --paginate "repos/<owner>/<repo>/pulls/<pr>/reviews?per_page=100"
+gh api --paginate "repos/<owner>/<repo>/pulls/<pr>/files?per_page=100"
 ```
 
-For failing, cancelled, missing, or suspicious GitHub Actions checks, follow `github:gh-fix-ci`: use the GitHub app/MCP for PR context and use `gh` for Actions check/log inspection because the connector does not expose that workflow end to end. Remote CI is evidence, not a substitute for local review and targeted validation.
+## 当前提交 CI 前置门禁
 
-When a reviewer or page summary claims CI is "all skipped", or when the GitHub UI and API summaries appear inconsistent, verify the current PR head directly before drawing conclusions:
+本节只适用于存在真实在线 PR 的正常模式；离线基准模式保持原约定。先解析当前精确 `headRefOid` 或 `head.sha`，再用最少的变更路径和 PR 声明判断哪些检查与本 PR 相关。任何详细代码审查、领域规范加载、任务清单、工作树、本地验证或 PR 写操作都必须等待本门禁完成。
 
-1. Resolve the current PR head SHA (`headRefOid` / `head.sha`) and query checks for that exact SHA, not an older reviewed commit or a stale merge ref.
-2. Prefer GraphQL `statusCheckRollup` and check suites/check runs, because they report GitHub Actions check runs and their aggregate state:
-   ```graphql
-   query($owner:String!, $repo:String!, $sha:GitObjectID!) {
-     repository(owner:$owner, name:$repo) {
-       object(oid:$sha) { ... on Commit {
-         checkSuites(first:20) { nodes {
-           status conclusion
-           workflowRun { databaseId url workflow { name } }
-           checkRuns(first:100) { nodes { name status conclusion } }
-         } }
-         statusCheckRollup { state contexts(first:100) { nodes {
-           __typename
-           ... on CheckRun { name status conclusion detailsUrl }
-           ... on StatusContext { context state targetUrl }
-         } } }
-       } }
-     }
-   }
-   ```
-3. REST fallback: query Actions check runs and jobs by the same head SHA, then count conclusions instead of relying on a single UI label:
-   ```bash
-   gh api "repos/<owner>/<repo>/commits/<head-sha>/check-runs?per_page=100"
-   gh api "repos/<owner>/<repo>/actions/runs?head_sha=<head-sha>&per_page=100"
-   gh api "repos/<owner>/<repo>/actions/runs/<run-id>/jobs?per_page=100"
-   ```
-4. Do not use `GET /repos/<owner>/<repo>/commits/<sha>/status` by itself to decide Actions CI state. That endpoint reports classic commit statuses only; it may return `pending` with an empty `statuses` array even when GitHub Actions check runs and the workflow have already succeeded.
-5. Distinguish expected skipped matrix jobs from a truly skipped workflow. In this repository, mutually exclusive `run_host` / `run_container` jobs, branch-restricted publish jobs, or path-filtered jobs may be `skipped` while sibling jobs in the same workflow are `success`; that is not "all CI skipped". Summarize the evidence with counts such as `success=N, skipped=M, failure=0` and name the relevant successful or skipped checks.
-6. Treat skipped checks as suspicious only when the PR changed the surface that the skipped check is supposed to cover, when path filters skipped required coverage, or when every relevant check for the changed app/test/architecture was skipped. Otherwise, record them as expected CI matrix/path-filter behavior.
+优先查询 `statusCheckRollup`、检查套件和检查运行；REST 回退也绑定同一 SHA。不能单独用传统的 `GET /repos/<owner>/<repo>/commits/<sha>/status` 判断 Actions 状态，因为它可能显示 `pending` 且 `statuses` 为空，而 Actions 已结束。
 
-Always inspect CI failures before submitting the review:
+```bash
+gh pr checks <pr> --repo <owner>/<repo> --watch=false
+gh api --paginate "repos/<owner>/<repo>/commits/<head-sha>/check-runs?per_page=100"
+gh api --paginate "repos/<owner>/<repo>/actions/runs?head_sha=<head-sha>&per_page=100"
+gh api --paginate "repos/<owner>/<repo>/actions/runs/<run-id>/jobs?per_page=100"
+```
 
-1. Fetch check summaries and enough logs to classify each non-passing required check:
-   ```bash
-   gh pr checks <pr> --repo <owner>/<repo> --watch=false
-   gh run view <run-id> --repo <owner>/<repo> --log-failed
-   ```
-2. Decide whether each CI failure is caused by this PR's changed surface, a likely unrelated pre-existing/infrastructure failure, or unclear.
-3. Treat CI as PR-related when the failing job exercises files, crates, cases, commands, platforms, or behavior changed by the PR; when the failure reproduces locally on the PR head but not on base; or when the new/modified tests, configs, or workflow steps cause the failure, hang, skip, or timeout.
-4. Treat CI as unrelated only when there is concrete evidence: the failure is outside the changed surface, known flaky/infrastructure behavior, already fails on base, or is tracked by an existing issue. Do not mark a failure unrelated merely because local focused validation passed.
-5. For unrelated CI failures, state that in the review body with the failing check name, observed failure, and why it is unrelated to this PR. Search for an existing issue before finishing. Use multiple searches keyed by the workflow/job name, distinctive error text, runner/platform, affected case, or failing command; do not rely on only one broad query:
-   ```bash
-   gh issue list --repo <owner>/<repo> --state open --search '<workflow or job name>'
-   gh issue list --repo <owner>/<repo> --state open --search '<distinctive error excerpt>'
-   gh issue list --repo <owner>/<repo> --state open --search '<runner platform, case, or command>'
-   ```
-   Inspect plausible matches before deciding whether they are suitable:
-   ```bash
-   gh issue view <issue-number> --repo <owner>/<repo> --comments
-   ```
-   A suitable issue tracks the same workflow/job, same distinctive failure mode, or same infrastructure/component breakage. If a suitable open issue exists, update it before finishing: add a neutral comment with the current PR number/URL, head SHA, check/run URL, failing job and step, representative log excerpt, why the failure appears unrelated to this PR, and any reproduction, rerun, or base-branch evidence. If the issue title/body is stale or too vague and repository permissions allow, update the title/body while preserving previous context; otherwise use a new issue comment.
-   ```bash
-   gh issue comment <issue-number> --repo <owner>/<repo> --body-file issue-update.md
-   gh issue edit <issue-number> --repo <owner>/<repo> --title '<updated neutral title>' --body-file issue.md
-   ```
-   If no suitable open issue exists, create one with a neutral title and body describing the CI job, PR where it was observed, representative log excerpt, why it appears unrelated, and any reproduction or rerun evidence:
-   ```bash
-   gh issue create --repo <owner>/<repo> --title '<neutral CI issue title>' --body-file issue.md
-   ```
-   Link the existing, updated, or newly-created issue in the review body. Do not create duplicate issues.
-6. For PR-related CI failures, submit `REQUEST_CHANGES`. The review body and any inline comment must explain the failing check, the concrete failure mode, why it belongs to this PR, and the expected fix direction.
-7. When causality is unclear after reasonable log inspection, do not approve on CI alone. Either request changes with the concrete uncertainty and next debugging direction, or mark the review blocked/no-submit if the user asked for investigation only.
+若任一相关检查或任务为 `queued`、`pending`、`waiting` 或 `in_progress`，立即将该 PR 标记为暂缓并停止。不得等待或轮询到结束，不得完整审查、创建工作树、运行本地验证、创建 PR 专属清单、解决讨论、提交评论或审查、创建或更新议题、修复冲突或更改审查人；只向用户报告 PR、当前 SHA、未结束检查名和状态。无关发布任务或按变更范围明确不适用的任务不触发暂缓，但必须记录不相关理由。
 
-## Worktree
+没有相关运行中检查时，先建立 CI 覆盖台账，再规划本地验证。每项台账记录受影响行为或声明、检查与任务名、当前 SHA、结论、实际命令、架构或配置、用例或二进制，以及可观察后置条件。只有 `success` 且证据表明当前精确提交实际执行了同一命令、架构或配置和目标行为时，才接受为覆盖；检查名或宽泛汇总绿灯、旧 SHA、路径或矩阵跳过、架构或 feature 不同、命令不等价、未达到成功标记，或无法证明新增用例被发现和执行，都不算覆盖。摘要不足时检查工作流定义和任务日志。
 
-Fetch the PR and base, then review in a detached worktree:
+对台账中已接受的 CI 覆盖，不得再运行等价本地验证，包括应用、QEMU、构建、clippy、测试、打包和工具流程。CI 失败、取消、缺失、陈旧、跳过或覆盖可疑时进入后续分类，并只为归因或未覆盖声明安排最窄的本地验证。CI 证据只替代重复执行，不替代代码、架构、ABI、生命周期、安全性、文档和测试可信度审查。
+
+## 审查讨论与终态 CI 分类
+
+涉及既有请求修改、未解决讨论、行内位置或解决状态时，遵循 `github:gh-address-comments`。扁平评论列表不能代表完整讨论状态。需要时使用带分页的完整 GraphQL 查询：
+
+```bash
+gh api graphql --paginate \
+  -F owner="$owner" -F repo="$repo" -F number="$pr" \
+  -f query='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{id isResolved isOutdated path line diffSide comments(first:100){nodes{author{login} body createdAt}pageInfo{hasNextPage endCursor}}}pageInfo{hasNextPage endCursor}}}}}'
+```
+
+若任一讨论的 `comments.pageInfo.hasNextPage=true`，再以该讨论的 `id` 分页取得剩余评论，不能把前 100 条当作完整讨论：
+
+```bash
+gh api graphql --paginate \
+  -F threadId="$thread_id" \
+  -f query='query($threadId:ID!,$endCursor:String){node(id:$threadId){... on PullRequestReviewThread{comments(first:100,after:$endCursor){nodes{author{login} body createdAt}pageInfo{hasNextPage endCursor}}}}}'
+```
+
+检查所有未解决讨论。具体问题已在当前提交修复时解决讨论；修复不完整、测试未接入运行器或评论仍有效时保持未解决。操作后重新查询并确认 `isResolved=true`：
+
+```bash
+thread_id='<thread-id>'
+gh api graphql \
+  -f query='mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}' \
+  -f threadId="$thread_id"
+```
+
+区分预期的矩阵或路径过滤 `skipped` 与整个相关工作流未运行。本仓库互斥的 `run_host`/`run_container`、分支限制发布任务或路径过滤任务可以为 `skipped`，其成功的同级任务足以说明工作流运行。以 `success=N, skipped=M, failure=0` 汇报，并命名关键检查。只有变更范围应由该检查覆盖、路径过滤跳过必需覆盖或所有相关检查均被跳过时，才把 `skipped` 视为可疑。
+
+提交审查前检查每个失败、取消、缺失或可疑检查的日志，并分类为“与 PR 相关”“与 PR 无关”或“无法确定”：
+
+- 与 PR 相关：失败任务覆盖本 PR 的文件、软件包、用例、命令、平台或行为；在 PR 当前提交可复现而基准分支不失败；或新增/修改的测试、配置、工作流导致失败、挂起、跳过或超时。提交 `REQUEST_CHANGES`，说明检查项、失败模式、归因和修复方向。
+- 与 PR 无关：提供具体证据，例如变更范围外、基准分支同样失败、已知偶发失败、基础设施问题或已有议题。用工作流或任务、特征错误、运行器或平台、用例或命令等多个关键词搜索并检查候选议题；更新合适的现有议题，或在确无匹配时创建唯一议题，并在审查正文链接它。
+- 无法确定：合理检查后因果仍不清楚时，禁止仅凭 CI 批准；根据证据请求修改，或在用户只要求调查时明确不提交审查的阻塞原因。
+
+```bash
+gh pr checks <pr> --repo <owner>/<repo> --watch=false
+gh run view <run-id> --repo <owner>/<repo> --log-failed
+gh issue list --repo <owner>/<repo> --state open --search '<workflow or job name>'
+gh issue list --repo <owner>/<repo> --state open --search '<distinctive error excerpt>'
+gh issue list --repo <owner>/<repo> --state open --search '<runner platform, case, or command>'
+gh issue view <issue-number> --repo <owner>/<repo> --comments
+gh issue comment <issue-number> --repo <owner>/<repo> --body-file issue-update.md
+gh issue edit <issue-number> --repo <owner>/<repo> --title '<updated neutral title>' --body-file issue.md
+gh issue create --repo <owner>/<repo> --title '<neutral CI issue title>' --body-file issue.md
+```
+
+日志下载为空时不能推断通过或无关；用 `gh pr checks` 和 `gh run view <run-id> --json headSha,jobs` 确认当前提交、失败任务、结论和步骤。
+
+## 工作树
+
+获取 PR 和基准分支，然后在分离状态工作树中审查：
 
 ```bash
 repo_root="$(git rev-parse --show-toplevel)"
@@ -145,7 +150,7 @@ git fetch origin '+refs/pull/<pr>/head:refs/remotes/origin/pr/<pr>' '+refs/heads
 git worktree add --detach "$review_wt" origin/pr/<pr>
 ```
 
-If the worktree already exists, reuse it only when clean and at the current PR head:
+已有工作树仅在无改动且位于当前 PR 提交时复用：
 
 ```bash
 git -C "$review_wt" status --short
@@ -153,180 +158,139 @@ git -C "$review_wt" rev-parse HEAD
 git rev-parse refs/remotes/origin/pr/<pr>
 ```
 
-If it is stale and clean, update it non-destructively to the fetched PR head. If it has local changes, create a fresh worktree path or ask how to proceed. Do not modify or revert the user's main worktree while reviewing.
+陈旧且无改动时无损更新；有本地改动时新建工作树或询问用户。禁止修改或回滚用户主工作树。并行审查不同 PR 时使用不同工作树；同一检出目录内不得并发运行多个 StarryOS QEMU 用例。
 
-Never review multiple StarryOS QEMU cases in the same checkout at the same time. Use separate worktrees for parallel PR review.
+## 合并冲突
 
-## Merge Conflicts
+仅在用户明确要求，或审查没有其他阻塞问题、本应 `APPROVE` 且当前 `mergeStateStatus=DIRTY`、`maintainerCanModify=true` 时修复。修复并推送、重新验证新提交前不得批准。
 
-Handle merge conflicts in either of these cases: the user explicitly asks for conflict handling, or this review has no blocking findings and would otherwise be `APPROVE` while the current PR metadata says `mergeStateStatus=DIRTY` and `maintainerCanModify=true`. Do not submit or reaffirm approval before the conflict repair is pushed and re-validated against the new head.
+只有 `reviewDecision=APPROVED` 才代表当前汇总批准。历史 `APPROVED` 审查只能作为上下文；汇总批准为空、为 `CHANGES_REQUESTED`，或仍有未解决讨论时，冲突修复只能做不提交的本地演练，除非用户明确要求推送修复。
 
-First refresh and classify the conflict and approval state:
+先刷新 PR 元数据、审查和远端当前提交。`mergeStateStatus=UNKNOWN` 时等待并重查。`DIRTY` 且 `maintainerCanModify=false` 时不得修复：用户明确要求处理冲突时提交 `REQUEST_CHANGES`，说明作者需合并或变基到最新基准分支，并建议启用 Allow edits by maintainers；否则在正文或总结中记录限制。`DIRTY` 且可修改时使用独立冲突工作树，并确认派生仓库分支仍等于 `headRefOid`。
 
 ```bash
 gh pr view <pr> --json number,baseRefName,headRefName,headRepositoryOwner,headRefOid,mergeStateStatus,maintainerCanModify,reviewDecision,reviews
-gh api "repos/<owner>/<repo>/pulls/<pr>/reviews?per_page=100"
+gh api --paginate "repos/<owner>/<repo>/pulls/<pr>/reviews?per_page=100"
+git fetch origin '+refs/pull/<pr>/head:refs/remotes/origin/pr/<pr>' '+refs/heads/<base>:refs/remotes/origin/<base>'
+git ls-remote "https://github.com/<head-owner>/<repo>.git" "refs/heads/<headRefName>"
+git worktree add --detach "$conflict_wt" origin/pr/<pr>
+git -C "$conflict_wt" merge --no-ff --no-commit "origin/<base>"
+git -C "$conflict_wt" diff --name-only --diff-filter=U
 ```
 
-- `reviewDecision=APPROVED` is the current aggregate approval state. Historical `APPROVED` review records are useful context, but do not by themselves mean the PR is currently approved; if aggregate approval is empty, `CHANGES_REQUESTED`, or review threads remain unresolved, treat conflict repair as a no-submit dry run unless the user specifically asked to push a repair.
-- If `mergeStateStatus=UNKNOWN`, refresh or wait and query again before acting. Do not infer a current conflict from stale search results.
-- If `mergeStateStatus=DIRTY` and `maintainerCanModify=false`, do not repair the branch. When conflict handling was explicitly requested, submit `REQUEST_CHANGES` explaining that the branch conflicts with base and maintainers cannot push a fix; ask the author to merge/rebase latest base and suggest enabling "Allow edits by maintainers". Otherwise, include the conflict limitation in the review body or user summary.
-- If `mergeStateStatus=DIRTY` and `maintainerCanModify=true`, create a separate conflict worktree and verify the contributor branch still matches `headRefOid` before doing pushable work:
+在分离状态的冲突工作树中，暂存区第 2 阶段（`ours`）是 PR，第 3 阶段（`theirs`）是基准分支；不清楚时使用 `git show :1:<path>`、`:2:`、`:3:`。按 PR 意图和当前基准语义解决，禁止简单保留两边或复活基准分支已替换的 API。PR 837 是参照：保留 `/proc/kallsyms` 功能，但适配 `SeqObject` 与 `SpecialFsFile::new_regular_with_perm`，并同时保留 `ktracepoint`/`ksym`、`.tracepoint`/`.kallsyms` 等独立改动，而不是恢复旧 `SeqFile`。
 
-  ```bash
-  conflict_wt="$repo_parent/$(basename "$repo_root")-conflict-pr<pr>"
-  git fetch origin '+refs/pull/<pr>/head:refs/remotes/origin/pr/<pr>' '+refs/heads/<base>:refs/remotes/origin/<base>'
-  git ls-remote "https://github.com/<head-owner>/<repo>.git" "refs/heads/<headRefName>"
-  git worktree add --detach "$conflict_wt" origin/pr/<pr>
-  git -C "$conflict_wt" merge --no-ff --no-commit "origin/<base>"
-  git -C "$conflict_wt" diff --name-only --diff-filter=U
-  ```
+提交修复前运行格式化、冲突标记扫描、差异卫生检查和针对性验证。解决 `Cargo.lock` 冲突时先处理其他文件，再由 Cargo 重新生成，禁止手工拼接。
 
-- In this detached conflict worktree, conflict marker `HEAD` / stage 2 / "ours" is the PR branch, and `origin/<base>` / stage 3 / "theirs" is current base. Use `git show :1:<path>`, `git show :2:<path>`, and `git show :3:<path>` when the ancestor, PR side, or base side is unclear.
-- Resolve conflicts semantically according to PR intent and current base behavior. Do not merely keep both sides, and do not resurrect APIs or layouts that base already replaced. Port the PR feature onto the new base abstraction, then keep independent additions from both sides when they do not conflict.
-- PR 837 is the reference example for this rule: the PR added `/proc/kallsyms`, while base had replaced the old `SeqFile` pattern with `SeqObject` plus `SpecialFsFile::new_regular_with_perm`. The correct repair was to keep the kallsyms feature but express it with the current base API, while also keeping independent base/PR additions such as `ktracepoint` plus `ksym` and `.tracepoint` plus `.kallsyms`.
-- Before committing the repair, run formatting, marker checks, diff hygiene, and focused validation for the changed surface:
+```bash
+cargo fmt
+rg -n '<<<<<<<|=======|>>>>>>>' <conflicted-files>
+git -C "$conflict_wt" diff --check
+<targeted cargo xtask/cargo test/cargo clippy commands>
+git -C "$conflict_wt" add <resolved-files>
+git -C "$conflict_wt" commit
+```
 
-  ```bash
-  cargo fmt
-  rg -n '<<<<<<<|=======|>>>>>>>' <conflicted-files>
-  git -C "$conflict_wt" diff --check
-  <targeted cargo xtask/cargo test/cargo clippy commands>
-  git -C "$conflict_wt" add <resolved-files>
-  git -C "$conflict_wt" commit
-  ```
+推送前确认合并提交第一父节点仍是当前 `headRefOid`，并再次执行 `git ls-remote`。远端变化时停止并重新审查。只能普通推送，禁止强制推送：
 
-- Before pushing a repaired conflict branch, refresh the PR and confirm the local merge commit's first parent equals the current remote `headRefOid`; also re-check the fork branch with `git ls-remote`. If the remote head changed, stop and re-review instead of pushing.
-- Push repaired fork branches with a normal non-force push to the PR head owner and branch, for example `git push https://github.com/<head-owner>/<repo>.git HEAD:<headRefName>`. Never force-push a contributor branch.
-- After pushing conflict repairs, refresh PR status, update the review worktree to the new head, and rerun the targeted validation that supports approval. Submit `APPROVE` only if the repaired head still has no blocking findings; otherwise submit `REQUEST_CHANGES` with the remaining conflict or validation problem.
-- `BLOCKED` or `UNSTABLE` may remain because of CI or reviews even after conflicts are gone; do not treat that alone as failed conflict repair.
-- If you performed only a conflict dry run or process exercise, do not push or submit a review. Record the PR number, approval-state nuance, conflicted files, semantic resolution, validation commands/results, and that no GitHub branch was changed; then abort/remove the conflict worktree unless the diagnostics must be kept.
+```bash
+git push https://github.com/<head-owner>/<repo>.git HEAD:<headRefName>
+```
 
-## Review Focus
+推送后刷新 PR，并对新 `headRefOid` 重新执行“当前提交 CI 前置门禁”。相关 CI 仍在运行时立即暂缓，不更新审查工作树、不执行本地验证也不批准；CI 成功精确覆盖的验证继续跳过本地重复，只补充新提交上仍未覆盖的最窄验证。冲突消失后，`BLOCKED`/`UNSTABLE` 仍可能由 CI 或审查状态导致，不能仅据此判定冲突修复失败。只做冲突演练时不得推送或提交审查；记录 PR、批准状态、冲突文件、语义解法、验证结果和未修改 GitHub 的事实，然后清理工作树。
 
-Review the PR against its stated intent, the current base branch, existing project patterns, and relevant external semantics. Understand the implementation logic, not just whether tests pass:
+## 审查重点
 
-- POSIX/Linux behavior for syscalls, process/session/signal semantics, filesystem errors, sockets, IPv4/IPv6, and `/proc`.
-- RFC or Linux behavior for networking details such as IPv6 NDP, IPv4-mapped IPv6, dual-stack listeners, route/listen conflicts, and errno behavior.
-- VirtIO, PCI, DMA, MMIO, IRQ, and ownership rules for driver changes.
-- Axvisor config semantics for `entry_point`, `kernel_load_addr`, `memory_regions`, `map_type`, and guest image layout.
-- `starry-test-suit` rules when StarryOS test cases or `qemu-*.toml` files change.
-- `cross-kernel-driver` architecture rules when portable driver crates or driver glue change.
+按 PR 意图、当前基准分支、项目既有模式和适用外部语义理解完整实现逻辑：
 
-### Review Lenses And Finding Discipline
+- 系统调用、进程/会话/信号、文件系统错误码、套接字、IPv4/IPv6 对照 POSIX/Linux；
+- 网络行为对照 RFC/Linux，包括 IPv6 NDP、IPv4 映射 IPv6、双栈、路由或监听冲突和错误码；
+- 驱动改动检查 VirtIO、PCI、DMA、MMIO、中断和所有权；
+- Axvisor 配置检查 `entry_point`、`kernel_load_addr`、`memory_regions`、`map_type` 和客户机镜像布局；
+- Starry 测试改动应用 `starry-test-suit`；可移植驱动或操作系统适配层改动应用 `cross-kernel-driver`。
 
-Review is recall-first: prefer finding every real defect in the changed surface over producing a short or polished review. Do not invent issues, but do not dismiss a plausible in-scope defect with "looks fine"; construct the concrete input, interleaving, device state, guest config, or test-run path that would trigger it, or explain why that scenario is impossible.
+影响 StarryOS 系统调用或 Linux ABI 时，按 `docs/guideline/starry_syscall.md` 的证据层级追踪间接辅助代码到每个受影响的系统调用入口；行为随版本变化时记录对照的 Linux 版本或提交。
 
-Apply these TGOSKits review lenses. A lens runs unless the changed paths and semantics provably contain nothing in its remit:
+### 新功能设计门禁
 
-- **Maintainability:** process and change shape, commit hygiene, focused PR scope, crate/module boundaries, naming, visibility, comments, and whether the next maintainer can understand the code without archaeology.
-- **Correctness:** runtime behavior under normal, error, concurrent, and hot paths; edge cases such as off-by-one errors, reachable `unwrap`/`expect`/panic, integer overflow, wrong predicates, dropped guards, lost wakeups, resource leaks, and tests that prove the behavior.
-- **Security/Soundness:** `unsafe` contracts, pointer provenance, aliasing, user-memory access, trust-boundary validation, privilege checks, TOCTOU, use-after-free, and invariants relied on by untouched `unsafe` blocks or unsafe trait impls.
-- **Hardware/ABI:** assembly, target JSONs, trap/context layout, SMP/boot handoff, MMIO/DMA/IRQ ownership, cache/coherency assumptions, VirtIO/PCI contracts, device-tree/config layout, and architecture-specific calling or alignment rules.
-- **Documentation/User-Facing Compatibility:** user-facing docs, runbooks, app workflows, test-suit guides, compatibility notes, syscall/kernel parameter descriptions, and whether documentation changes stay current with behavior visible to StarryOS, ArceOS, Axvisor, or users.
+新增或扩展功能时，按 `docs/guideline/feature-development.md` 分类为局部、共享或高风险，并在清单记录分类和证据位置。按以下顺序审查：必要性、重复性、语义与既有方案、替代方案、整体架构或 API、实现、验证与交付。
 
-For each candidate finding, identify the natural owning lens and avoid duplicating the same investigation under every lens. If several symptoms share one root cause or one fix, keep each symptom at its own actionable location but explain the shared fix once and refer the related comments to it.
+核对具体问题、目标用户或调用方、真实场景、成功标准、不包含项、仓库内部研究、适用的权威外部研究、现实替代方案和不实现成本。高风险功能必须有可独立审查的设计材料，覆盖适用的所有权、依赖、兼容性、迁移、回滚、可观测性、性能和安全。先提交重大设计阻塞问题，再处理低层细节。测试通过不能替代“为什么项目需要它、为什么优于复用或扩展、为什么现在值得承担复杂度”的解释。
 
-Every submitted finding, inline comment, or body-only blocker must include:
+### 审查视角与问题纪律
 
-- **grounding:** the project rule, external standard, observed failure, or plain-language defect class, such as "Off by one", "Use after free", or "wrong errno";
-- **severity:** whether it is blocking, major but non-blocking, minor, or nit-level;
-- **problem:** the concrete behavior or maintainability failure and the scenario that exposes it;
-- **fix direction:** the expected repair, not just a complaint;
-- **evidence:** changed line, code path, validation output, CI log, external reference, or reasoning proof.
+优先找全变更范围内的真实缺陷，不为简短而漏报，也不臆造问题。对可疑缺陷构造具体输入、并发交错、设备状态、客户机配置或测试路径；若场景不可能则说明原因。
 
-Before submitting, verify the load-bearing premises of every finding. Re-read the cited code and, when the finding depends on outside behavior, check an authoritative source such as Linux/POSIX/RFC/VirtIO specs, Rust reference/docs, hardware manuals, or existing TGOSKits runner semantics. Keep uncertain but plausible findings only when the uncertainty is explicit; retract findings whose premise is confidently false instead of posting stale or speculative feedback.
+除非变更显然不涉及，否则应用五类审查视角：
 
-For bug fixes (修复 bug), require a regression or reproduction test that fails on the unfixed behavior and passes only after the fix unless concrete evidence shows the environment makes such a test impossible. The reviewer must verify this from the test code, author-provided red/green evidence, or local red/green validation when practical. If the PR fixes a bug but lacks a post-fix-only regression test and no concrete impossibility is documented, treat that as blocking. For raw syscall fixes, prefer direct `syscall(SYS_...)` coverage when libc wrappers could mask return values or errno.
+- 可维护性：流程、提交卫生、范围、软件包或模块边界、命名、可见性、注释和可理解性；
+- 正确性：正常路径、错误路径、并发、热路径、边界偏差、可达的 `unwrap`/`expect`/`panic`、溢出、错误判断条件、保护条件、唤醒和资源泄漏；
+- 安全与健全性：`unsafe` 契约、指针来源、别名、用户内存、信任边界、权限、检查与使用时序竞争、释放后使用；
+- 硬件与 ABI：汇编、目标 JSON、陷阱与上下文、SMP 启动、MMIO/DMA/中断、缓存一致性、VirtIO/PCI、设备树或配置、调用约定与对齐；
+- 文档与用户可见兼容性：文档、操作手册、应用流程、测试套件指南、兼容性说明和用户可见行为。
 
-For any PR that adds behavior, changes semantics, fixes a bug, or claims coverage for a newly exposed path, require tests at the correct project layer unless the PR is clearly documentation-only or the review records a concrete reason tests are impossible. Verify that the tests are not merely present in the diff: they must be in the expected suite or wrapper, discovered by the project runner, built or installed into the runtime image when applicable, selected by the documented command, and capable of failing when the behavior regresses. Treat misplaced tests, orphan assets, tests hidden behind opt-in/manual-only paths, or tests that CI/runner silently skips as missing coverage.
+同一根因不要在每个视角重复报告；多个症状可以分别锚定，但只完整解释一次共享修复。提交前复核所有承重前提、引用代码和权威外部来源；明确不确定性，撤回前提错误的问题。
 
-For PRs that add StarryOS app support, separate operator-facing app scenarios from CI-oriented semantic coverage:
+### 测试与行为门禁
 
-- App-level smoke, demo, rootfs preparation, board/QEMU run scripts, and long-running or opt-in workflows belong under `apps/starry/<app-or-scenario>/`, following `apps/starry/README.md`.
-- Kernel ABI, syscall, filesystem, process, networking, or other bugfix coverage exposed while enabling the app belongs under `test-suit/starryos/<case>` or the closest existing grouped wrapper, such as a `qemu-smp*/system/<subcase>` grouped C subcase.
-- If the PR adds a syscall or changes syscall semantics for the app, require a minimal test-suit syscall/regression test that exercises the syscall surface directly; an app smoke passing is not enough.
-- If the PR fixes a bug found through the app, require a test-suit bugfix/regression test that reproduces the bug without depending on the full app workflow whenever practical; keep the app scenario in `apps/starry` as integration evidence.
-- Do not approve app-support PRs that put app workflows only into `test-suit/starryos`, or that hide syscall/bugfix coverage only inside `apps/starry` demos.
-- If the PR adds or changes an app-oriented Starry QEMU case under either `apps/starry` or `test-suit/starryos`, run the actual documented app command or exact `cargo xtask starry test qemu ... -c <case>` path in QEMU for at least the changed/claimed architecture. For multi-arch `qemu-*.toml` additions, run the architecture most likely to fail from CI or PR history; if any newly added required architecture is already failing in CI, reproduce or classify that architecture before approval.
-- Do not approve when the app/test cannot be run as described by the PR, when its success depends on an unavailable or unstable external service without a controlled fallback, or when the command only passes on a narrower target than the PR claims. Report the exact command, architecture, guest-visible failure marker, and whether the failure matches remote CI.
+错误修复必须有确定性回归或复现：未修复实现必然失败，修复后同一测试通过；除非有具体证据说明环境不可能做到，否则缺少失败/通过证明即阻塞。普通的当前提交成功 CI 只证明修复态 green；未修复态 red 仍须由测试逻辑证明、作者提供的 red/green 记录、明确执行未修复变体的 CI，或非重复的本地基准验证提供。原始系统调用修复优先直接覆盖 `syscall(SYS_...)`，避免 libc 封装掩盖返回值或错误码。
 
-Apply the same runtime-validation expectation to ArceOS apps and app-facing tools. A PR that adds or changes an ArceOS app, `apps/**` demo, QEMU wrapper, rootfs/app preparation tool, symbolizer/log parser, packaging helper, or other tool that claims to make a StarryOS/ArceOS app usable must be reviewed as an executable workflow, not as a syntax-only or docs-only change.
+新增行为、语义变更、错误修复或新暴露路径必须在正确项目层级有测试。不能只看到测试文件：验证运行器能够发现、构建或安装、选择、执行，并且回归时会失败。错放、孤立、仅手工执行、可选执行或被 CI 静默跳过的测试按缺失处理。
 
-Do not approve changes that are only shaped to satisfy the added tests, such as hard-coded special cases, skipped behavior, fake state updates, no-op compatibility shims, or logic that does not implement the intended subsystem semantics. Treat this as blocking even when local tests and CI pass.
+StarryOS 应用支持分层：
 
-Do not accept "success path" tests that silently skip on unexpected failure, such as returning early when `brk`, `sbrk`, I/O, or socket setup returns `ENOMEM`/`EAGAIN`, unless the test prints an explicit skip marker and the review explains why the environment legitimately cannot require success. Bugfix reproduction tests should fail loudly when the fixed behavior is absent.
+- 面向操作人员的冒烟、演示、根文件系统、板卡或 QEMU 脚本、长运行或可选流程放 `apps/starry/<app-or-scenario>/`；
+- 内核 ABI、系统调用、文件系统、进程、网络或错误修复语义覆盖放 `test-suit/starryos/<case>` 或既有分组封装；
+- 系统调用变化必须有直接测试套件回归；应用冒烟不足以证明系统调用；
+- 应用暴露的内核错误尽量提取为无需完整应用的测试套件回归，应用场景保留为集成证据。
 
-Do not accept changes that simplify, skip, or weaken existing CI/test requirements unless the PR clearly justifies an equivalent or stronger replacement and the replacement is validated. Treat as blocking when a PR removes cases from required test-suit coverage, narrows architectures, loosens `success_regex`/`fail_regex`, converts failures into skips/timeouts, changes workflow path filters so relevant tests no longer run, or moves coverage from CI into an opt-in/manual path without preserving regression coverage.
+每个新增、变更或 PR 明确声明支持的 StarryOS/ArceOS 应用，都建立独立证据项，列明文档化环境准备、架构、运行命令和可观察后置条件。当前精确提交的成功 CI 若证明实际执行了同一准备、命令、架构或配置和目标行为，则关闭为 CI 已覆盖，不得本地重复；否则按文档运行最窄的缺失流程。通用改动只补测 CI 未覆盖的最高风险声明架构；架构特定改动只补测每个新增或变更但未被 CI 覆盖的架构。文档本身无法让用户准备环境、需要未记录的临时绕过或声明范围与可复现证据不一致时，仍提交 `REQUEST_CHANGES`。
 
-For PRs that add or change Starry QEMU tests, `qemu-*.toml`, grouped wrappers, generated QEMU runners, or QEMU `success_regex`/`fail_regex`, verify failure propagation as a hard gate. A guest test failure must be observable by `cargo xtask starry test qemu ...` as a failed case, not only as a log line. Treat this as blocking when a QEMU test binary fails but the wrapper still prints the grouped success marker, the command exits zero, `fail_regex` cannot match the failure marker, `$?` is overwritten before being captured, or a failing subcase is converted into an unreviewed skip. Board config changes should still be reviewed against the existing board runner semantics, but do not force them into the QEMU grouped/C runner failure-propagation model.
+禁止测试外形的伪修复、硬编码特例、伪状态、空操作兼容层或未实现真实语义的逻辑。成功路径测试遇到 `ENOMEM`/`EAGAIN` 等意外失败时不得静默返回；合法跳过必须打印明确标记并解释原因。禁止删减用例、架构，放宽 `success_regex`/`fail_regex`，把失败变成跳过或超时，修改路径过滤跳过相关覆盖，或把 CI 覆盖移到仅手工执行，除非有等价或更强且已验证的替代。
 
-For new or moved Starry grouped/system tests, check the physical layout against the runner and build wrapper, not only the filename. In current `qemu-smp*/system` grouped C cases, each subcase must remain buildable through the system root CMake project: `CMakeLists.txt` and `src/` live directly under `system/<subcase>/`, subcase-local `qemu-*.toml` files are not used, and `cargo xtask starry test qemu --arch <arch> -c qemu-smp*/<subcase>` should select that subcase. A `system/<subcase>/c/` layout is blocking unless the PR also updates the root CMake, runner discovery, guide, and rule tests to support it and validates the new behavior.
+Starry QEMU 失败必须传播到 `cargo xtask starry test qemu ...`：封装脚本在命令后立即保存 `$?`，失败时打印 `STARRY_GROUPED_TEST_FAILED` 或配置标记，不得再打印全部通过标记，并让外层命令失败。`success_regex`/`fail_regex` 必须可靠分类。当前 `qemu/system` 分组 C 子用例的 `CMakeLists.txt` 与 `src/` 必须直接位于 `system/<subcase>/`；`system/<subcase>/c/` 默认阻塞，除非同时更新根 `CMakeLists.txt`、运行器发现逻辑、指南和规则测试并验证。
 
-### Crates.io Patch Policy
+## 可发布 Cargo 补丁策略
 
-When a PR touches `Cargo.toml`, `Cargo.lock`, dependency metadata, duplicate crate versions, third-party dependency APIs, or code that bridges between dependency-owned and workspace-owned types, inspect whether it adds, changes, or relies on a `[patch.crates-io]` override. Do not approve PRs that introduce or depend on any crates.io patch, regardless of whether the patch target is a local path, fork, git revision, registry replacement, or another override form.
+PR 触及 `Cargo.toml`、`Cargo.lock`、已提交的 `.cargo/config`/`.cargo/config.toml`、依赖元数据、重复版本、第三方 API 或跨依赖类型边界时，检查所有 `[patch]` 和变更的依赖来源。按来源是否能由本仓库或 crates.io 重现、工作区是否可发布来判断；存在 `[patch.crates-io]` 本身不阻塞。
 
-Normal workspace dependency declarations, such as a workspace member using `{ path = "...", version = "..." }`, are not the same as a crates.io patch. The blocking case is overriding crates.io resolution through `[patch.crates-io]`.
+允许但必须通过解析与发布检查的来源：
 
-The preferred fix is to keep third-party dependencies using their normal crates.io resolution and adapt through explicit local boundaries:
+- 相对于声明清单或配置解析并规范化后仍位于当前仓库内的 `path`；
+- crates.io 已发布的精确版本，包括普通依赖中的 `version = "=1.2.3"`，以及用该版本替代其他来源的注册表补丁。
 
-- use the dependency crate's exported public types, traits, error types, or result aliases instead of referencing or replacing that dependency's internal dependency paths;
-- add a crate-private adapter near the boundary when local code needs a local type, error, trait object, or ABI representation;
-- replace implicit `?` conversions that cross dependency-local and workspace-local types with explicit `.map_err(...)`, `TryFrom`, wrapper newtypes, or a crate-private extension trait;
-- keep dependency-facing trait/API code in the dependency's own exported types when it is still implementing or satisfying that dependency's public boundary;
-- if the dependency itself is wrong, prefer an upstream fix, a normal dependency upgrade path, or a clearly scoped local adapter, not a workspace-level crates.io patch in the PR.
+以下情况阻塞：任意 `git`、绝对 `path`、逃逸仓库的相对路径、非 crates.io 注册表；元数据未解析到预期软件包、版本或来源；请求版本未发布；依赖统一破坏 API 或类型语义；完整工作区发布演练失败。
 
-For error-type mismatches, convert through stable public information exposed by the dependency. For example, when the dependency exports an errno-bearing error, convert the public code into the local errno/error type at the boundary and provide an explicit fallback for unknown values.
+发布软件包可使用 `{ path = "...", version = "..." }`，打包时 Cargo 使用 crates.io 版本要求；只有 `path` 的普通依赖对需要发布的软件包是阻塞项。根 `[patch]` 中的仓库相对路径自身不要求版本回退，但发布软件包的普通依赖声明仍然要求。
 
-Example: for the `kbpf-basic`/Starry eBPF boundary, do not accept `[patch.crates-io] ax-errno = { path = "components/axerrno" }`. Keep `kbpf-basic` on crates.io `ax-errno`; use `kbpf_basic::BpfError` and `kbpf_basic::BpfResult`; add a crate-private eBPF error adapter that converts `err.code()` into local `ax_errno::LinuxError` and then `ax_errno::AxError`; use that adapter in Starry eBPF/perf entry points that return local `AxResult`.
+补丁若只为掩盖依赖方与工作区各自拥有的类型不一致，优先使用正常 crates.io 解析和显式边界：使用依赖公开类型；在边界添加软件包私有适配器；使用 `.map_err(...)`、`TryFrom`、封装新类型或扩展 trait；未知错误码提供明确回退。根 `[patch.crates-io] ax-errno = { path = "components/axerrno" }` 的来源形态允许，并可在元数据与完整发布演练证明时统一发布依赖图；若目的只是让 `kbpf-basic` 错误与另一份本地错误类型隐式互换，则保留 `kbpf_basic::BpfError`/`BpfResult` 到 `LinuxError`/`AxError`/`AxResult` 的显式转换。
 
-## Duplicate And Overlap Analysis
+## 重复与重叠分析
 
-This analysis is required for every PR, not only bug fixes. Its purpose is to avoid approving duplicate implementations, stale rework, superseded fixes, or PRs that unknowingly conflict with another open PR.
+每个 PR 必做。先建立意图指纹：标题、描述、议题、提交、变更的软件包/模块/测试/配置/CI/生成资产、公共 API、系统调用、错误码、协议、设备、运行器、功能，以及功能、修复、覆盖、重构、配置、CI、依赖元数据等语义声明。
 
-Build an intent fingerprint before searching:
+先查当前基准分支是否已有等价或更新实现，再用多个意图指纹关键词搜索开放 PR；不能只搜标题。读取候选的意图、文件和差异后分类：
 
-- PR title, body, linked issue numbers, commit subjects, and author-stated validation.
-- Changed crates, modules, test cases, configs, CI files, and generated assets.
-- Public APIs, syscall names, errno behavior, protocol terms, device types, runner commands, test binary names, and feature flags touched by the patch.
-- The semantic claim being made: new feature, bug fix, test coverage, refactor, config update, CI repair, or dependency/metadata change.
-
-Check current base branch first. Search for equivalent behavior, tests, config entries, public APIs, or previous fixes already present on `origin/<base>`:
+- 重复：同一问题或同一 API、测试、配置，无实质差异；
+- 部分重叠：同一受影响范围，但互补、可排序或可拆分；
+- 冲突风险：修改同一契约、运行器、生成资产或 ABI，存在合并或语义冲突；
+- 已被取代：基准分支或其他 PR 更完整、更符合项目方向；
+- 检查后无关：关键词命中但审阅后无关。
 
 ```bash
 git grep -n -E '<relevant symbols|paths|commands>' origin/<base> -- <likely paths>
 git log --oneline --decorate -- <likely paths>
-```
-
-If base already has the same behavior or a newer version of it, treat the PR as stale or duplicate unless it clearly adds distinct value. Verify that distinction by reading the relevant base code, not just matching names.
-
-Then check related open PRs. Use the GitHub MCP/connector to search or list candidate PRs before falling back to `gh`. Search with multiple terms derived from the intent fingerprint; do not rely only on the PR title. Useful terms include crate/module names, changed path fragments, syscall or API names, test case names, issue numbers, errno values, protocol/device names, CI job names, and config names.
-
-```bash
 gh pr list --state open --limit 200 --search '<symbol OR path OR issue keyword>'
 gh pr view <related-pr> --json number,title,body,author,baseRefName,headRefName,isDraft,updatedAt,files,commits
 gh pr diff <related-pr> --patch --color=never
 git diff --name-only origin/<base>...origin/pr/<related-pr>
 ```
 
-Inspect each plausible related PR enough to classify it:
+依赖另一 PR 先落地时，在描述或审查中明确依赖前不得批准。重复或已被取代时请求修改，或中性说明应优先采用的基准实现或 PR。使用 `git diff origin/<base>...origin/pr/<pr>` 查看 PR 补丁；只有检查陈旧分支影响时才用 `..`。用户要求关闭时，先执行 `gh pr comment <pr> --body-file comment.md`，再执行 `gh pr close <pr>`。
 
-- `duplicate`: solves the same problem or adds the same test/API/config behavior with no meaningful distinction.
-- `partial-overlap`: touches the same surface but the changes are complementary, ordered, or separable.
-- `conflict-risk`: likely merge or semantic conflict because both PRs modify the same contract, runner behavior, generated asset, or ABI expectation.
-- `superseded`: another PR or current base implements the same intent more completely or in a better-aligned way.
-- `unrelated-after-inspection`: matched search terms but does not overlap after reading files/diff/intent.
+## 验证
 
-For `partial-overlap` or `conflict-risk`, compare the implementation direction with project semantics and note the expected merge order or follow-up needed. If correctness depends on another PR landing first, do not approve until that dependency is explicit in the PR body or review outcome. For `duplicate` or `superseded`, submit `REQUEST_CHANGES` or leave a neutral project-focused comment explaining which base code or open PR should be preferred and why.
-
-Use `git diff origin/<base>...origin/pr/<pr>` for the PR patch. Use `origin/<base>..origin/pr/<pr>` only when intentionally checking stale-branch effects.
-
-Treat a PR as not mergeable when it is superseded by a more complete PR or would regress newer base-branch work. Leave a neutral project-focused comment explaining why the newer PR or base implementation should be preferred. If asked to close such a PR, prefer `gh pr comment <pr> --body-file comment.md` followed by `gh pr close <pr>`; avoid shell backticks in inline `--comment` strings.
-
-## Validation
-
-Run focused validation matching the changed surface. Prefer project `xtask` commands:
+验证必须匹配变更范围。选择任何本地命令前先查 CI 覆盖台账；已被当前精确提交成功 CI 精确覆盖的等价命令标记为跳过，并记录检查、任务和覆盖细节，不得重复运行。只为 CI 未覆盖、失败、取消、缺失、陈旧、跳过或可疑的范围安排最窄本地命令，并优先使用项目 `cargo xtask`：
 
 ```bash
 cargo fmt --check
@@ -336,128 +300,138 @@ cargo xtask starry test qemu --arch <arch> -c <case>
 cargo xtask axvisor build ... --vmconfigs <config>
 ```
 
-If `cargo xtask` does not cover a special configuration, inspect the relevant `xtask` help or source before falling back to native Cargo with matched arguments. Record exact commands and failures.
+特殊配置无法由 `xtask` 覆盖时，先检查 `xtask` 帮助和源码，再用参数完全匹配的原生 Cargo 命令。记录精确命令与失败。
 
-For dependency metadata changes, inspect dependency resolution instead of relying only on the diff. Check for any crates.io patch first, then inspect the affected dependency subtree:
+依赖元数据变更必须扫描补丁，并取得元数据、依赖树和完整工作区发布演练证据。当前提交成功 CI 已精确执行对应命令时复用该证据；否则在本地执行缺失命令：
 
 ```bash
-rg -n '\[patch\.crates-io\]' -g 'Cargo.toml' .
-cargo metadata --format-version=1 | jq -r '.packages[] | [.name,.version,.source,.manifest_path] | @tsv' | rg '<affected-crate>'
+rg --hidden -n '^\s*\[patch(?:\.|\])' -g 'Cargo.toml' -g '**/.cargo/config' -g '**/.cargo/config.toml' .
+cargo metadata --locked --format-version=1 | jq -r '.packages[] | [.name,.version,.source,.manifest_path] | @tsv' | rg '<affected-crate>'
 cargo tree -p <affected-package> | rg '<affected-crate>|<boundary-crate>'
+cargo publish --workspace --dry-run --no-verify
 ```
 
-For the `kbpf-basic`/`ax-errno` example, useful focused checks are:
+相对路径按声明文件解析并确认规范化后仍在仓库根目录下；精确 crates.io 替代版本必须在元数据中显示 crates.io 注册表来源和精确版本。新增、变更或依赖补丁，或修改可发布工作区软件包的来源时，完整工作区打包或解析演练证据是硬门槛；涉及工作区发布顺序或从路径依赖改写到注册表依赖时，单软件包演练不能替代。`--no-verify` 会跳过软件包验证构建，因此该命令或其 CI 结果不能代替未被覆盖的针对性构建、静态检查或运行验证。
 
-```bash
-cargo metadata --format-version=1 | jq -r '.packages[] | select(.name=="ax-errno") | [.version,.source,.manifest_path] | @tsv'
-cargo tree -p starry-kernel | sed -n '/kbpf-basic v0.5.7/,+12p'
-```
+每个受影响应用严格按 PR 描述或变更文档建立并核验执行证据：
 
-The expected result for that example is that local workspace crates still use local `components/axerrno`, while `kbpf-basic` resolves its own crates.io `ax-errno` and local Starry eBPF/perf code performs explicit error conversion at the boundary.
+1. 分别列出环境准备、架构、运行命令、可观察后置条件，以及对应的当前提交 CI 检查和任务。
+2. 文档覆盖软件包、工具链、根文件系统、权限、硬件、凭据、网络服务、环境变量、资产、参数和就绪检查；只能引用完整覆盖该应用的规范章节。
+3. 不使用本地知识补充未记录命令，不依赖未说明的机器状态。
+4. 当前提交成功 CI 已精确执行相同准备、命令、架构或配置并达到同一后置条件时，记录证据并跳过本地运行；否则本地运行真实的 `cargo xtask starry app qemu ...`、`cargo xtask starry test qemu ...`、`cargo xtask arceos test qemu ...` 或文档封装命令。
+5. 无论证据来自 CI 还是本地，都验证客户机标记、应用输出、日志、符号化位置、软件包产物等真实结果；退出码为 0 但未执行行为不算通过。
+6. 本地补测且 `tmp/axbuild/rootfs` 为空时，仍尝试文档中的根文件系统或测试命令，让 `xtask` 自动下载；失败则记录并提交 `REQUEST_CHANGES`。
+7. 同一工作树内一次只运行一个 Starry QEMU 用例。
 
-For app/tool workflows that CI does not execute exactly, manual runtime validation is a hard gate. This applies when the PR adds or changes:
+同样的 CI 覆盖与补测规则适用于 ArceOS 应用、`apps/**` 演示，以及准备、启动、检查、符号化、解析日志、打包或操作 StarryOS/ArceOS 应用的 QEMU 封装、根文件系统或应用准备工具、符号化工具、日志解析器和打包辅助工具。CI 未执行精确流程时，本地运行真实流程，不能只验证语法、文档、`--help`、解析或构建。若缺失流程确因硬件、凭据、服务或宿主能力不可用，记录限制并要求受控回退或其他可复现证据。
 
-- StarryOS user-space app support, `apps/starry/**` scenarios, Starry rootfs/app preparation, or Starry QEMU run docs/scripts;
-- ArceOS apps, `apps/**` demos, `test-suit/arceos/**` app configs, or ArceOS QEMU run docs/scripts;
-- tools or wrappers that prepare, launch, inspect, symbolize, package, or otherwise operate on a StarryOS or ArceOS app workflow;
-- README/PR-body runbooks that claim the app/tool is usable while the current CI matrix does not run that exact command and success condition.
+分组 QEMU 新增或迁移测试必须核对 `test_commands` 的发现与安装、`/usr/bin/<test>`、`status=127`、子用例选择、功能门控和正则表达式。至少取得以下一种证据：当前提交本地运行、当前提交 CI 明确显示该用例或二进制执行，或确定性构建与发现检查。汇总 CI 通过不足以证明测试未被跳过。检查 shell 封装失败分支和分组错误修复断言，不能只运行成功路径。
 
-Do not approve based only on `cargo fmt`, clippy, shellcheck, `--help`, script readability, TOML parsing, case listing, build success, or another reviewer saying an older head passed. Those checks are useful supplements, but they do not prove the app or tool works.
+对每个新增或迁移测试，不限于分组 QEMU，都写明实际执行它的运行器命令，并取得以下至少一种当前提交证据：本地执行；CI 日志明确显示具体用例、子用例或二进制执行；或确定性构建与发现检查证明运行器一定到达该测试。宽泛的汇总 CI 通过不能证明测试未被路径布局、过滤器、安装规则、子用例选择或功能门控跳过。
 
-Required manual flow:
+应用支持同时包含系统调用或内核错误修复时，应用流程与对应 `cargo xtask starry test qemu` 分别取得当前提交执行证据；每项可由精确 CI 独立覆盖，只本地补充缺口。没有测试变更时，若 PR 描述或提交声称 QEMU、宿主单元测试、`xtask`、静态检查、脚本、模拟器等非实体板卡验证，先核对 CI 是否精确执行；已覆盖则不复跑，未覆盖时再本地执行并核对命令、目标、输出和通过条件。不可复现、静默跳过、目标更窄或失败时请求修改。既无测试又无可复现的非实体板卡验证时禁止批准。仅实体板卡证据不能单独满足此门槛，除非用户明确限定审查范围。
 
-1. Read the PR body, README, scripts, and config files to find the exact documented workflow and expected success marker.
-2. Do the documented preparation first, such as `cargo xtask starry rootfs --arch <arch>`, managed rootfs download/patching, app asset generation, tool build steps, or log/artifact capture.
-3. Run the current PR head through the actual runtime command, such as `cargo xtask starry app qemu ...`, `cargo xtask starry test qemu ...`, `cargo xtask arceos test qemu ...`, or the documented wrapper script that reaches QEMU.
-4. Verify guest-visible behavior and the tool's real output: success markers, app command output, generated logs, symbolized blocks, packaged artifacts, or other documented postconditions. A command that exits 0 but skips the app behavior is not sufficient.
-5. For multi-architecture support, run the newly added or most failure-prone architecture, prioritizing any architecture skipped or failing in CI. If the PR claims all-arch support and CI covers only part of it, local validation must cover at least one CI-missing or highest-risk architecture.
-6. If the workflow cannot be run because required documentation, rootfs preparation, assets, or tool outputs are missing or wrong, submit `REQUEST_CHANGES`; that is a PR problem, not an environment limitation.
-7. If the workflow genuinely needs unavailable hardware, credentials, network services, or unsupported host capabilities, record the exact limitation and do not treat syntax/build checks as proof. Require a controlled fallback, a test-suit regression test, or explicit user acceptance before approval.
+远端 CI 是必需证据但不是唯一证据；没有检查不等于通过。当前精确提交的成功 CI 可以替代其精确覆盖的本地执行，但不能替代静态分析、语义审查、覆盖真实性检查，也不能自动提供错误修复的未修复态 red 证据。
 
-For StarryOS grouped QEMU cases, verify that new `test_commands` are actually discovered and installed into the guest overlay. A `qemu-*.toml` command such as `/usr/bin/<test>` must correspond to a case/subcase asset path that the runner discovers and builds. For current `qemu-smp*/system` grouped C cases, prefer the smallest current-structure command that covers the change, such as `cargo xtask starry test qemu --arch x86_64 -c qemu-smp1/<subcase>`, or run the aggregate `-c qemu-smp1/system` when wrapper-level behavior is changed. Treat `/usr/bin/<test>: not found`, `status=127`, skipped discovery, unbuilt asset directories, wrong grouped/system subcase layout, unreliable `success_regex`/`fail_regex`, hidden exit status, or tests that accept both broken and fixed behavior as blocking.
+## 阻塞问题
 
-For every newly added or relocated test, identify the exact runner command that should execute it and verify at least one of these evidence sources: local execution on the current head, current-head CI logs that show the specific case/subcase/binary running, or a deterministic build/discovery check that proves the runner reaches the test. Do not treat a broad aggregate CI pass as proof when the new test could have been skipped by path layout, command filtering, missing install rules, subcase selection, or feature gating.
+相关 CI 仍为非终态时不进入阻塞判断，而是按前置门禁暂缓并停止处理。CI 已无相关运行中任务后，除非有明确证据表明不阻塞，否则以下情况阻塞：
 
-When reviewing Starry grouped/system shell wrappers, inspect failure branches as code, not only by looking at a successful run. The wrapper must capture `$?` immediately after the test command, print `STARRY_GROUPED_TEST_FAILED` or the configured failure marker on failure, avoid printing the all-passed marker after any failure, and cause the outer xtask run to fail.
+- 与 POSIX/Linux/RFC/VirtIO 语义不符；
+- 新功能缺少问题、用户或调用方、成功标准、不包含项、内部重复搜索、适用权威研究或现实替代方案；
+- 高风险功能缺少可独立审查设计或合格领域审查人；
+- 跨层捷径、硬编码特殊路径、重复真相源、伪成功、静默回退、无当前使用者的投机 API、配置或扩展；
+- 针对性测试、格式化、静态检查或与 PR 相关的 CI 失败；
+- 当前提交的 StarryOS/ArceOS 应用或 QEMU 用例在 CI 或必要本地补测中按文档失败，或失败未传播到 `xtask`；
+- 应用或 QEMU 声明只验证发现、TOML 解析、旧提交或他人结果；
+- 任何受影响应用缺少当前精确提交上覆盖同一准备、命令、架构或配置和后置条件的成功 CI 或本地执行证据，或文档缺环境、命令、参数、就绪条件；
+- CI 未覆盖的必要应用流程需要不可用的硬件、凭据、权限、服务、宿主能力或未记录的临时绕过，且没有其他可复现证据；
+- 新行为、语义或错误修复缺测试，或测试错位、未发现、未构建或安装、未选择、未直接覆盖 ABI；
+- 覆盖因布局、路径过滤、功能门控、子用例、安装规则或仅手工执行的位置被跳过；
+- 无测试变更且无可复现的非实体板卡验证，或声明的验证不可复现或不匹配；
+- `success_regex`/`fail_regex` 不能可靠分类；
+- 错误修复缺少必然失败与通过的回归或复现，且未证明不可能；
+- Cargo 补丁使用 `git`、绝对路径、仓库外路径、非 crates.io 注册表，普通可发布依赖只有路径，请求的 crates.io 版本不存在，解析到非预期软件包、版本或来源，或完整工作区发布演练失败；
+- 合并冲突未解决，修复复活过时的基准 API，或推送后的新提交未重新通过 CI 前置门禁和必要的未覆盖验证；
+- 应用流程与测试套件的语义覆盖层级错误；
+- 仅测试的伪修复未实现真实行为；
+- 缓冲区、DMA 内存、队列令牌、中断所有权泄漏、过早释放或跨错抽象层；
+- CI 以超时等终态失败、跳过新覆盖，或削弱既有用例、架构、正则、路径过滤或正常回归；
+- 重复基准分支、削弱已有实现、与开放 PR 冲突或已被取代；
+- 无法解释与候选相关 PR 的差异；
+- 必需清单项仍为 `pending`、不可验证或缺少证据或具体不适用理由。
 
-For bugfix tests in grouped cases, inspect the new test's assertions as well as running the case. A grouped case passing is not sufficient when the new test accepts both the fixed behavior and the broken behavior.
+## 中文审查文本规范
 
-For StarryOS app-support PRs, validate both sides when both are present:
+所有 GitHub 审查文本，包括总审查正文、行内评论和讨论回复，均使用中文、中性且项目导向的表达。命令、路径、代码符号、接口字段、产品名和标准正式名称可以保留原文；在叙述中用中文说明其作用，不连续堆叠英文术语。面向第一次接触相关模块的读者，先说明对象在调用链中的角色，再说明状态变化、触发条件和可观察结果。禁止使用“请优化”“测试通过”“这里不正确”等缺少原因、逻辑和证据的结论。
 
-- Run the relevant `apps/starry` command or an equivalent documented app workflow when the PR adds or changes app support, unless it needs unavailable hardware, credentials, or long-running services; record any limitation.
-- Run the corresponding `cargo xtask starry test qemu --arch <arch> -c <case>` case when the PR adds a syscall, fixes a kernel/runtime bug, or claims test-suit coverage. For `qemu-smp*/system` subcases, use `-c qemu-smp*/<subcase>` when possible. App validation does not replace test-suit regression validation.
-- If the app scenario and test-suit regression cover different risks, mention both results in the review body.
-- Do not stop at `--list`, TOML parsing, script inspection, or another reviewer saying an older head passed. Those checks prove discovery only, not that the app works. Run the current head in QEMU whenever the changed app/test is intended to run in QEMU.
-- If `tmp/axbuild/rootfs` is empty, still try the relevant `cargo xtask starry rootfs --arch <arch>` or `cargo xtask starry test qemu ...` path before declaring QEMU unavailable; the xtask flow can download managed rootfs images automatically. Record a blocker only after the xtask download/run path itself fails for an environmental reason.
-- Do not run multiple Starry QEMU cases concurrently in one worktree. Run one architecture/case to completion, then move to the next architecture if needed.
+### 要求修改的评论模板
 
-When the PR does not add or modify a test case, inspect the PR body and commit messages for any claimed non-board validation method, such as QEMU, host unit tests, `cargo xtask`, `cargo test`, `cargo clippy`, shell scripts, emulators, or reproducible manual commands that do not require physical hardware:
+凡是要求继续修改代码、测试、文档或配置的行内评论和讨论回复，先复制以下七项粗体 Markdown 标题骨架，再逐项填写具体内容。输出时保留 `**标题**` 语法，不得删除标题、留空、合并成含糊短句、改成连续段落或依赖总审查正文代替：
 
-- If such validation is claimed, run it or an equivalent local command before approval. Compare the actual command, target, output, and pass/fail condition with the PR's claim.
-- If the claimed validation fails, is not reproducible as written, exercises a different target than claimed, silently skips the changed behavior, or cannot be run for an avoidable reason, submit `REQUEST_CHANGES`. Explain the mismatch and the expected fix direction: either make the validation true and reproducible, add an appropriate test, or correct the PR description.
-- If the claimed validation cannot be run because the environment is genuinely unavailable, record the exact limitation and do not treat the claim as proof. Require another reproducible non-board validation method or a test unless the user explicitly accepts the limitation.
-- If the PR has no test changes and neither the PR body nor commit messages describe a reproducible non-board validation method, do not approve. Request changes asking the author to add a test or document and provide a runnable validation command that covers the changed behavior.
-- Physical board-only validation may be useful evidence, but it does not satisfy this no-test fallback rule by itself unless the user explicitly scopes the review to board-only behavior.
+- **为什么需要改动**：说明当前问题、不修改会产生的实际后果和受影响对象。
+- **改动收益**：说明修复后恢复或新增的可观察保证，以及对正确性、可维护性、安全性、兼容性或测试可信度的收益。
+- **改动前逻辑（基准分支）**：只说明基准分支在 PR 之前的入口、关键状态变化、所有权或错误传播和最终结果。若属于新增路径或缺失测试，写明基准分支此前没有该路径或覆盖。
+- **改动后逻辑（当前 PR）**：只说明当前 PR 已经引入的入口、关键状态变化和结果，并指出问题出现在哪一步。新增测试场景应写“PR 添加了文件，但当前布局使运行器无法发现”；绝不把期望修复后的未来逻辑写在此处，未来逻辑只放“建议修改方式”。
+- **触发场景与证据**：给出具体输入、状态、并发交错、设备状态、调用链、日志、测试或规范依据；引用当前提交的路径、行号和符号。
+- **问题级别**：说明是否阻塞以及影响范围。阻塞问题明确写出会导致的错误结果、崩溃、死锁、资源泄漏、ABI 不兼容、测试失效或其他可观察后果。
+- **建议修改方式**：描述应恢复的语义、顺序、所有权、错误传播或测试契约，以及修改完成后的验收条件。只约束根因和必要边界，不替作者扩展无关重构。
 
-Use GitHub check status as required evidence, but not as the only review input:
+同一根因只在最贴切的评论中完整解释一次。若其他变更行只是同一根因的症状，引用该评论并说明本行的局部影响，不再发布重复的修改要求；若该评论本身仍要求修改，则仍须包含七个标题。纯信息说明和批准结论不强制使用七段模板，但仍须使用中文并给出必要依据。
 
-```bash
-gh pr checks <pr> --watch=false
-```
+### 总审查正文
 
-Do not approve solely because remote CI passes. Conversely, if required checks are failing, cancelled, or missing for a branch that needs CI coverage, inspect logs and classify the failure before deciding. Treat PR-related CI failures as blocking and request changes with the expected fix direction. If a CI failure is unrelated to the PR, it is not by itself a reason to request changes, but the review body must say why it is unrelated and link the existing issue that was updated or the newly-created tracking issue. A branch with no reported checks is not equivalent to passing; require targeted local validation before approving, and request changes when the changed surface is too large or risky to validate locally.
+总审查正文先复制 `## 为什么需要改动`、`## 改动收益`、`## 改动前逻辑（基准分支）`、`## 改动后逻辑（当前 PR）` 四个二级 Markdown 标题，再逐项填写，形成完整的整体叙事，并通过路径或评论引用汇总行内问题，避免机械复制。正文还覆盖适用的以下内容：
 
-When GitHub log download fails or returns an empty log, do not infer the check passed or was irrelevant. Use `gh pr checks <pr> --repo <owner>/<repo> --watch=false` and `gh run view <run-id> --json headSha,jobs` to confirm the current head, failing job names, conclusions, and failing steps. If the failing job matches a newly added or changed app/test architecture, treat it as PR-related unless concrete evidence proves otherwise.
+- PR 改动、功能开发规范适用性、风险分类和设计材料位置；
+- 新功能的问题、用户、成功标准、不包含项、研究、替代方案和取舍；
+- 实现逻辑、项目语义、验证命令与结果；
+- 测试要求、位置、构建、发现、选择和执行证据；
+- 每个应用的当前提交、准备文档来源、架构、运行命令、可观察后置条件、证据来源，以及因精确 CI 覆盖而跳过或实际执行的本地验证；
+- 审查清单审计、无测试时复核的声明、CI 状态、无关失败证据和跟踪议题；
+- 重复与重叠分类、冲突处理、与 PR 相关的 CI 失败和修复方向；
+- 错误修复的失败/通过证据、已解决与未解决讨论、未实现或后续项、环境限制。
 
-## Blocking Findings
+不能只写“测试通过”。没有阻塞问题的批准正文也说明审查范围、改动前后逻辑、主要收益、验证证据和剩余风险。
 
-Treat these as blocking unless clearly non-blocking:
+### 回复已修复问题
 
-- behavior differs from POSIX/Linux/RFC/VirtIO semantics;
-- targeted tests, formatting, clippy, or PR-related CI fail;
-- a newly added or changed Starry app/QEMU case fails when run as described by the PR, including one architecture among newly added multi-arch `qemu-*.toml` cases;
-- a Starry QEMU test failure is visible in guest logs but does not make `cargo xtask starry test qemu ...` fail, including hidden `$?`, missing failure marker, overly loose `success_regex`, or missing `fail_regex` coverage;
-- a PR claims app/QEMU support but only discovery, TOML parsing, or an older-head run was validated;
-- a PR adds or changes CI-missing StarryOS user-space support, an ArceOS app, or an app-facing tool/wrapper, but the documented preparation plus QEMU/runtime workflow was not run on the current head;
-- an app/tool workflow's documentation is incomplete or wrong enough that the reviewer cannot prepare the environment, launch QEMU, or verify the documented postcondition;
-- required tests are missing for new behavior, semantic changes, or bug fixes, without a concrete documented impossibility;
-- new or relocated tests are misplaced, not discovered by the project test runner, not built/installed into the runtime image, not selected by the documented command, or do not exercise the fixed ABI surface;
-- CI passes only because new coverage is skipped by layout, path filters, feature gating, grouped subcase selection, missing install rules, or manual-only placement;
-- a PR has no test changes and lacks a reproducible non-board validation method in the PR body or commit messages;
-- a claimed non-board validation method is not actually reproducible or does not match the claimed coverage/result;
-- `success_regex` or `fail_regex` cannot reliably classify the intended StarryOS case result;
-- a bug-fix PR lacks a regression or reproduction test that fails on the unfixed behavior and passes only after the fix, unless concrete evidence shows such a test is impossible;
-- the PR adds, changes, or relies on any `[patch.crates-io]` override, instead of using normal dependency resolution, an upstream fix, a dependency upgrade, or an explicit local boundary adapter;
-- merge conflicts are unresolved, conflict repair resurrects outdated base APIs instead of adapting PR intent to current base, or the repaired head was not revalidated after push;
-- StarryOS app-support PRs place app workflows under `test-suit/starryos` instead of `apps/starry`, or place syscall/bugfix semantic coverage only under `apps/starry` instead of the matching test-suit case;
-- the implementation is a test-only or fake fix that does not implement the intended behavior;
-- submitted buffers, DMA memory, queue tokens, or IRQ ownership can leak, be freed too early, or cross the wrong abstraction layer;
-- a change silently makes CI hang, time out, or skip the new coverage;
-- a change weakens CI or normal-regression coverage by removing cases, narrowing architectures, loosening pass/fail regexes, skipping relevant workflows, or moving required coverage to manual-only paths without an equivalent validated replacement;
-- the PR duplicates existing base-branch behavior, weakens an existing implementation, conflicts with a related open PR, or is superseded by a newer base-branch or open-PR fix;
-- the review cannot explain how this PR differs from a plausible related open PR after duplicate and overlap analysis.
+仅确认问题已修复的回复可以缩短为“状态”“逻辑变化”“验证证据”三部分，写明当前提交、原问题如何被修复、修改前后的关键差异和同一回归测试的结果。作者只有解释而没有修改代码或测试时，不把解释当作修复证据。仍要求继续修改或只修复一部分时，使用完整七段模板并保持讨论未解决。
 
-All GitHub review text, including inline comments, review body, and replies, must be in Chinese, neutral, and project-focused. Each blocking comment should include the grounding, severity, concrete problem, evidence, and suggested fix direction required by the review-lens discipline above.
+### 发布前后格式检查
 
-Prefer changed lines on the PR diff. Before submitting, verify every inline `line` exists on the current right side of the diff; if GitHub cannot resolve a line, move to the nearest changed line that demonstrates the issue or put the finding in the review body. Context or unchanged lines may be rejected by the review API.
+发布前逐条检查未发布草稿：
 
-## Submit Review
+- 中文叙述是否完整，英文是否仅为允许保留的精确标识；
+- 必填标题是否齐全且顺序正确，各节是否非空并面向初学者解释上下文；
+- 是否残留 `TODO`、`TBD`、`<placeholder>` 或模板说明文字；
+- Markdown 标题、列表、空行、代码围栏、反引号和链接是否闭合且层级正确；
+- 行内评论的 `path`、`line`、`side=RIGHT` 是否存在并绑定当前 `headRefOid`；
+- 总审查正文、行内评论和回复之间是否重复、矛盾或遗漏阻塞问题。
 
-Before submitting, confirm through the GitHub MCP/connector that the PR head SHA has not changed. Fallback only when connector data is unavailable:
+任一检查不满足时丢弃草稿并重写，不得以“语义已经包含”为由省略固定标题。
+
+提交后重新读取实际发布的总审查正文、行内评论和回复，检查 GitHub 上的显示、标题、列表、代码块、链接、内容完整性和讨论状态。接口调用成功不等于格式正确。发现格式错误时优先编辑原评论；无法编辑时发布一条完整修正版，并明确原评论已被替代。格式修正不得改变问题语义或掩盖当前提交已经变化的事实。
+
+## 提交审查
+
+提交前用同一个任务清单工具逐项审计。任何必需项仍为 `pending`、不可验证或无证据时不得 `APPROVE`。PR 导致的测试证据缺失、环境准备失败或应用运行失败进入 `REQUEST_CHANGES`；外部系统阻止提交时明确不提交审查。
+
+通过连接器确认 PR 的 `headRefOid` 未变化；回退命令：
 
 ```bash
 gh pr view <pr> --json number,headRefOid,reviewDecision
 ```
 
-If the head changed after analysis or validation, fetch the new head, update the worktree, re-check each finding on current changed lines, and rerun the targeted validation that supports the decision.
+当前提交变化时先对新 SHA 重新执行 CI 前置门禁；相关 CI 仍在运行时立即暂缓。门禁通过后再重新获取、更新工作树、在新的右侧变更行复核每个问题，并只运行新提交上仍未被 CI 覆盖且支撑结论所需的验证。
 
-Submit the final review through the GitHub MCP/connector when it can send the review event and inline comments with preserved anchors together. If the connector cannot submit inline review comments or cannot preserve line anchors, fallback to the GitHub review REST API via `gh`:
+先按“中文审查文本规范”完成草稿和发布前格式检查。优先用连接器一次提交审查事件和带锚点评论；连接器无法保持锚点时使用 REST：
 
 ```bash
 gh api --method POST repos/<owner>/<repo>/pulls/<pr>/reviews --input review.json
 ```
 
-Use the current `headRefOid` as `commit_id`, `side=RIGHT` for inline comments, `REQUEST_CHANGES` for any blocking issue, and `APPROVE` only when no blocking issue remains:
+请求载荷使用当前 `headRefOid`、`side=RIGHT`；有任何阻塞问题时使用 `REQUEST_CHANGES`，无阻塞问题时才使用 `APPROVE`：
 
 ```json
 {
@@ -470,86 +444,49 @@ Use the current `headRefOid` as `commit_id`, `side=RIGHT` for inline comments, `
 }
 ```
 
-Do not submit stale findings against an old head.
-
-If a worker returns a finding on a line that is not present on the current PR diff, move the comment to the nearest changed line that demonstrates the problem or put the finding in the review body.
-
-After submission, re-query the PR. If a new commit landed during review submission, refresh the worktree and submit a follow-up review only if the blocking issue still applies to the new head.
-
-Review body must explain in Chinese:
-
-- what the PR changed;
-- the implementation logic and why this approach is correct for the project semantics;
-- validation commands and results, including exact failure mode for failing tests;
-- required test coverage status, including why tests were required or not applicable, where new tests were placed, how the runner discovers/selects them, and whether local or current-head CI evidence shows the specific tests executing;
-- for CI-missing app/tool workflows, the documented preparation performed, the exact QEMU/runtime command run, the architecture, and the guest-visible or tool-output postcondition that proved usability;
-- when no tests are added, the PR body/commit-message validation claim that was checked, the command actually run, and whether it matched the claim;
-- CI status, including any unrelated failing checks, the evidence for unrelatedness, the linked tracking issue, and whether that issue was updated or created during review;
-- duplicate and overlap analysis: base-branch evidence checked, related open PRs inspected, and why the PR is distinct, complementary, duplicate, conflicting, or superseded;
-- conflict handling status when applicable: conflicted files, resolution logic, validation after repair, and whether a repair commit was pushed or the work was intentionally kept as a dry run;
-- for PR-related CI failures, the failing check, failure mode, and expected fix direction;
-- reproduction coverage status for bug fixes, including whether the regression test fails on the unfixed behavior and passes only after the fix;
-- unresolved review conversations that were resolved, and conversations intentionally left open and why;
-- any behavior that remains unimplemented, partial, or should be completed in future work;
-- any known environment limitation.
-
-Do not approve when the review cannot explain the implementation logic beyond "tests pass".
-
-Verify final state:
+禁止提交针对旧提交的问题。提交后重新查询审查和评论，执行发布后格式检查；若期间出现新提交，仅在问题对新提交仍成立时提交后续审查。
 
 ```bash
 gh pr view <pr> --json number,reviewDecision,latestReviews
 ```
 
-## Post-Review Reviewer Assignment
+## 推荐审查人分配
 
-After review submission, decide whether the PR still needs human reviewer requests. Do this after the technical review so reviewer choice is based on the actual changed surface, duplicate/overlap findings, validation risk, and remaining follow-up.
+仅在提交审查后仍需领域跟进时请求审查人。读取 `.github/MAINTAINERS.md`；它是本地事实来源和自动人类审查人的严格允许列表。只有 `R:` 可自动请求；`M:` 只是所有权元数据，除非同一账号也在 `R:`。不得推断或请求允许列表外的人类审查人。
 
-Use discussion 594 as the reviewer source of truth. Read the current table directly before assigning because personnel directions may change:
+用 PR 标题、描述、变更路径、API、测试、验证、问题、软件包、配置、功能和差异中可见的标识符匹配 `F:`/`K:`。多个部分命中时请求所有对应 `R:`。非草稿且无匹配时，确认 `ZR233` 位于 `R:` 后将其作为回退，并明确这是回退而不是所有权证据。草稿默认不更新审查人，除非用户明确要求。
 
-```bash
-gh api graphql \
-  -f query='query($owner:String!,$repo:String!,$number:Int!){ repository(owner:$owner,name:$repo){ discussion(number:$number){ title body url comments(first:100){nodes{author{login} body createdAt}} } } }' \
-  -F owner=rcore-os -F repo=tgoskits -F number=594
-```
+默认仅新增：保留全部现有人类和机器人请求，把所有权目标与现有请求取并集，只新增缺失审查人；待删除审查人为空，除非用户明确要求删除或重新平衡。即使用户要求移除，也保留机器人，除非明确要求移除机器人。新请求中去掉 PR 作者和当前 GitHub 用户。
 
-Map PR content to reviewer directions from the "人员方向整理" table:
-
-- StarryOS tests, `test-suit/starryos`, QEMU cases, rootfs/app tests, `apk`, distro behavior, or `axbuild` test flow: prefer reviewers covering `测试`, `发行版/rootfs`, `axbuild`, and the relevant `starry` area.
-- Syscall, filesystem, network, driver, platform, architecture, CI, documentation, and display changes should be mapped to the matching table columns, then cross-checked against changed files and PR body claims.
-- If a PR matches several domains, request one primary reviewer for the highest-risk domain and one secondary reviewer for integration or test coverage. Avoid over-requesting reviewers.
-- Drop the PR author from targets. Preserve existing bot review requests and unrelated existing human reviewer requests unless the user explicitly asks to rebalance them.
-
-For StarryOS QEMU app/rootfs tests such as an `apk` or `git` case under `test-suit/starryos/<case>`, a good mapping is `测试` + `发行版/rootfs` + `starry`: `@ZCShou` for test/rootfs/axbuild ownership and `@luodeb` for Starry/rootfs experience. Use this as a pattern, not as a hard-coded rule; still inspect the current discussion table and PR contents.
-
-Before writing reviewer requests, check current requested reviewers and permissions:
+写入前查询当前状态与权限，并记录单 PR 演练：当前审查人、目标审查人、保留的人类和机器人、待新增、待删除、`F:`/`K:` 证据或回退、跳过原因。
 
 ```bash
-gh api repos/rcore-os/tgoskits/pulls/<pr>/requested_reviewers
-gh api repos/rcore-os/tgoskits/collaborators/<login>/permission
+gh api repos/<owner>/<repo>/pulls/<pr>/requested_reviewers
+gh api repos/<owner>/<repo>/collaborators/<login>/permission
 ```
 
-Use the REST requested-reviewers API instead of `gh pr edit`, because `gh pr edit` can fail in this repository while querying deprecated Projects classic fields:
+使用 REST `requested-reviewers` API，不用可能触发 Projects classic 问题的 `gh pr edit`。默认仅新增时不调用 DELETE：
 
 ```bash
 printf '%s\n' '{"reviewers":["<login1>","<login2>"]}' |
-  gh api -X POST repos/rcore-os/tgoskits/pulls/<pr>/requested_reviewers --input -
+  gh api -X POST repos/<owner>/<repo>/pulls/<pr>/requested_reviewers --input -
 ```
 
-After assigning, re-query `requested_reviewers` and confirm the intended reviewers are present. If GitHub rejects a reviewer, record the exact login and API or permission error; do not silently substitute someone not supported by discussion 594.
+仅在用户明确要求删除或重新平衡时：
 
-In the final user summary, state:
+```bash
+printf '%s\n' '{"reviewers":["<login>"]}' |
+  gh api -X DELETE repos/<owner>/<repo>/pulls/<pr>/requested_reviewers --input -
+```
 
-- which reviewer direction columns matched the PR;
-- which reviewers were requested, already present, skipped, or rejected;
-- any permission/API limitation;
-- that only GitHub reviewer metadata was changed, when no code files were edited by the assignment step.
+分配后重新查询确认。GitHub 拒绝审查人时记录账号和精确 API 或权限错误，禁止静默换成允许列表外的人。最终向用户汇报匹配的 MAINTAINERS 项、已请求、已存在、已保留、已跳过、被拒绝、`ZR233` 回退、权限或 API 限制，以及审查人步骤是否只修改 GitHub 元数据。
 
-## Cleanup
+## 清理
 
-After review submission or an explicit no-submit stop, clean temporary resources before ending:
+提交审查或明确不提交审查后：
 
-- Remove clean review and conflict worktrees with `git worktree remove <path>`, then run `git worktree prune` from the main repository.
-- Delete temporary files created for review payloads, GraphQL queries, comments, logs, or conflict notes unless the user asked to keep them.
-- Do not remove a worktree that has uncommitted conflict-repair work, diagnostics needed for a reported failure, or user-created changes; report the path and reason instead.
-- Confirm the main worktree status was not changed by the review workflow.
+- 删除无改动的审查或冲突工作树，并从主仓库运行 `git worktree prune`；
+- 删除审查请求载荷、GraphQL 查询、评论、日志、冲突说明等临时文件，除非用户要求保留；
+- 工作树有未提交的冲突修复、需要保留的诊断或用户改动时不得删除，向用户报告路径和原因；
+- 确认主工作树未被审查流程修改；
+- 清理后在同一个任务清单工具做最终审计，汇报已完成、不适用、阻塞和未完成项目。

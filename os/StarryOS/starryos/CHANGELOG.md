@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.29](https://github.com/rcore-os/tgoskits/compare/starryos-v0.5.28...starryos-v0.5.29) - 2026-08-20
+
+### Added
+
+- *(starry-nixos)* add Stage-2 NixOS userspace baseline ([#1923](https://github.com/rcore-os/tgoskits/pull/1923))
+
+### Other
+
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+## [0.5.28](https://github.com/rcore-os/tgoskits/compare/starryos-v0.5.27...starryos-v0.5.28) - 2026-08-09
+
+### Other
+
+- *(repo)* unify workspace dependencies ([#1860](https://github.com/rcore-os/tgoskits/pull/1860))
+
+## [0.5.27](https://github.com/rcore-os/tgoskits/compare/starryos-v0.5.26...starryos-v0.5.27) - 2026-08-03
+
+### Other
+
+- *(block)* adopt IRQ-driven multi-queue runtime ([#1768](https://github.com/rcore-os/tgoskits/pull/1768))
+
+## [0.5.26](https://github.com/rcore-os/tgoskits/compare/starryos-v0.5.25...starryos-v0.5.26) - 2026-07-23
+
+### Added
+
+- *(rockchip-rga)* add the RK3588 RGA2 2D accelerator driver with /dev/rga and dma-heap ([#1388](https://github.com/rcore-os/tgoskits/pull/1388))
+
+### Other
+
+- *(cpu-local)* extract per-CPU register ownership ([#1662](https://github.com/rcore-os/tgoskits/pull/1662))
+- *(axbuild)* 将构建与启动能力收敛到显式配置 ([#1620](https://github.com/rcore-os/tgoskits/pull/1620))
+
+## [0.5.25](https://github.com/rcore-os/tgoskits/compare/starryos-v0.5.24...starryos-v0.5.25) - 2026-07-10
+
+### Other
+
+- updated the following local packages: ax-driver, axplat-dyn, ax-hal, ax-runtime, starry-kernel, axbuild, ax-std
+
+## [0.5.24](https://github.com/rcore-os/tgoskits/compare/starryos-v0.5.23...starryos-v0.5.24) - 2026-07-08
+
+### Other
+
+- updated the following local packages: axplat-dyn, ax-hal, ax-runtime, axbuild, ax-driver, ax-std, starry-kernel
+
 ## [0.5.23](https://github.com/rcore-os/tgoskits/compare/starryos-v0.5.22...starryos-v0.5.23) - 2026-07-08
 
 ### Other

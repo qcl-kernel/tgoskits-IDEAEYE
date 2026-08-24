@@ -34,8 +34,11 @@
     test_runner(crate::bare_metal_test_runner)
 )]
 
-#[cfg(all(test, not(target_os = "none"), feature = "multitask"))]
-mod tests;
+#[cfg(all(feature = "host-test", not(target_os = "none")))]
+extern crate std;
+
+/// Native ArceOS synchronization primitives.
+pub mod sync;
 
 #[cfg(all(test, target_os = "none"))]
 fn bare_metal_test_runner(_tests: &[&dyn Fn()]) {}
@@ -69,8 +72,11 @@ cfg_if::cfg_if! {
 
         #[macro_use]
         mod run_queue;
+        mod interrupt;
         mod task;
         mod api;
+        #[doc(hidden)]
+        pub mod runtime_preempt;
         #[cfg(feature = "lockdep")]
         mod lockdep;
         #[cfg(feature = "tracepoint-hooks")]
@@ -92,8 +98,41 @@ cfg_if::cfg_if! {
         pub use self::api::{sleep, sleep_until, yield_now};
         #[cfg(feature = "tracepoint-hooks")]
         pub use self::sched_tracepoint::SchedTracepoint;
+        #[cfg(all(feature = "smp", feature = "ipi"))]
+        pub use self::run_queue::handle_ipi_reschedule;
     } else {
         mod api_s;
         pub use self::api_s::{sleep, sleep_until, yield_now};
+    }
+}
+
+/// Runtime checks that require a bound ArceOS CPU-local area.
+#[cfg(all(axtest, feature = "multitask"))]
+#[doc(hidden)]
+pub mod axtest_support {
+    /// Checks the live atomic-context query and target stack configuration.
+    #[cfg(feature = "axtest")]
+    pub fn atomic_context_and_stack_configuration_hold() -> bool {
+        super::api::axtask_api_atomic_context_structs_hold_for_test()
+    }
+
+    /// Marks the current task for a deterministic preemption safe-point test.
+    #[cfg(feature = "preempt")]
+    pub fn request_current_preemption() {
+        super::api::request_current_preemption_for_test();
+    }
+
+    /// Records that the current task consumed its first-entry scheduler frame.
+    ///
+    /// This hook remains available without the `preempt` feature because the
+    /// runtime completes the first-entry scheduler handoff for every multitask
+    /// axtest configuration, including non-preemptive workspace consumers.
+    pub fn record_initial_scheduler_frame_consumed() {
+        super::api::record_initial_scheduler_frame_consumed_for_test();
+    }
+
+    /// Reports whether the current task consumed its first-entry scheduler frame.
+    pub fn initial_scheduler_frame_consumed() -> bool {
+        super::api::initial_scheduler_frame_consumed_for_test()
     }
 }

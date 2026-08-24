@@ -12,20 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     arch::naked_asm,
     fmt::{Debug, Formatter, Result},
     mem::size_of,
 };
 
-use ax_errno::{AxResult, ax_err, ax_err_type};
-use ax_memory_addr::AddrRange;
-use axdevice_base::{BaseDeviceOps, SysRegAddrRange};
-use axvm_types::{
-    AccessWidth, GuestPhysAddr, GuestVirtAddr, HostPhysAddr, MappingFlags, NestedPageFaultInfo,
-    NestedPagingConfig, Port, SysRegAddr, VCpuId, VMId, VmArchVcpuOps, VmExit,
-};
 use bit_field::BitField;
 use raw_cpuid::CpuId;
 use x86::{
@@ -34,40 +27,110 @@ use x86::{
     dtables::{self, DescriptorTablePointer},
     segmentation::SegmentSelector,
 };
-use x86_64::registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags, EferFlags};
+use x86_64::registers::{
+    control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags, EferFlags},
+    rflags::RFlags,
+};
 use x86_vlapic::EmulatedLocalApic;
 
-use super::{
-    VmxExitInfo, as_axerr,
-    definitions::VmxExitReason,
-    structs::{IOBitmap, MsrBitmap, VmxRegion},
-    vmcs::{
-        self, ApicAccessExitType, VmcsControl32, VmcsControl64, VmcsControlNW, VmcsGuest16,
-        VmcsGuest32, VmcsGuest64, VmcsGuestNW, VmcsHost16, VmcsHost32, VmcsHost64, VmcsHostNW,
-    },
-};
+use super::{VmxExitInfo, definitions::*, structs::*, vmcs::*, *};
 use crate::{
-    X86VCpuCreateConfig, X86VCpuSetupConfig, ept::GuestPageWalkInfo, host, msr::Msr,
-    regs::GeneralRegisters, restore_host_interrupt_flag, x86_real_mode_entry_state, xstate::XState,
+    msr::*,
+    pending_event::{PendingEvent, queue_pending_event},
+    port_io::*,
+    regs::*,
+    xstate::*,
+    *,
 };
 
 const VMX_PREEMPTION_TIMER_SET_VALUE: u32 = 100_000;
 
 const QEMU_EXIT_PORT: u16 = 0x604;
-const QEMU_EXIT_MAGIC: u64 = 0x2000;
 const X86_PIT_PORT_BASE: u16 = 0x40;
 const X86_PIT_PORT_COUNT: u32 = 4;
 const X86_PIT_SPEAKER_PORT: u16 = 0x61;
-const X86_COM1_PORT_BASE: u16 = 0x3f8;
-const X86_COM1_PORT_COUNT: u32 = 8;
 const X2APIC_MSR_BASE: u32 = 0x800;
 const X2APIC_MSR_END: u32 = 0x8ff;
 const X2APIC_EOI_MSR: u32 = X2APIC_MSR_BASE + 0xb;
-pub const X86_APIC_ACCESS_GPA: usize = 0xfee0_0000;
-const X86_LOCAL_APIC_SIZE: usize = 0x1000;
 const X86_LOCAL_APIC_EOI_OFFSET: usize = 0xb0;
 const X86_IOAPIC_BASE: usize = 0xfec0_0000;
 const X86_IOAPIC_SIZE: usize = 0x1000;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct VmxSyscallMsrState {
+    star: u64,
+    lstar: u64,
+    cstar: u64,
+    fmask: u64,
+    kernel_gs_base: u64,
+}
+
+trait VmxSyscallMsrBank {
+    fn read(&self) -> VmxSyscallMsrState;
+
+    /// # Safety
+    ///
+    /// The caller must prevent interrupts and migration until the host state is restored.
+    unsafe fn write(&mut self, state: VmxSyscallMsrState);
+}
+
+struct HardwareVmxSyscallMsrBank;
+
+impl VmxSyscallMsrBank for HardwareVmxSyscallMsrBank {
+    fn read(&self) -> VmxSyscallMsrState {
+        VmxSyscallMsrState {
+            star: Msr::IA32_STAR.read(),
+            lstar: Msr::IA32_LSTAR.read(),
+            cstar: Msr::IA32_CSTAR.read(),
+            fmask: Msr::IA32_FMASK.read(),
+            kernel_gs_base: Msr::IA32_KERNEL_GSBASE.read(),
+        }
+    }
+
+    unsafe fn write(&mut self, state: VmxSyscallMsrState) {
+        unsafe {
+            Msr::IA32_STAR.write(state.star);
+            Msr::IA32_LSTAR.write(state.lstar);
+            Msr::IA32_CSTAR.write(state.cstar);
+            Msr::IA32_FMASK.write(state.fmask);
+            Msr::IA32_KERNEL_GSBASE.write(state.kernel_gs_base);
+        }
+    }
+}
+
+/// Loads vCPU-owned syscall MSRs and returns the displaced host state.
+///
+/// # Safety
+///
+/// Interrupts and migration must remain disabled until [`leave_guest_syscall_msrs`] restores the
+/// returned host state.
+unsafe fn enter_guest_syscall_msrs(
+    guest: VmxSyscallMsrState,
+    bank: &mut impl VmxSyscallMsrBank,
+) -> VmxSyscallMsrState {
+    let host = bank.read();
+    unsafe {
+        bank.write(guest);
+    }
+    host
+}
+
+/// Saves vCPU-owned syscall MSRs and restores the host state displaced on entry.
+///
+/// # Safety
+///
+/// `host` must be the snapshot returned by the matching [`enter_guest_syscall_msrs`] call, with
+/// interrupts and migration disabled continuously between both calls.
+unsafe fn leave_guest_syscall_msrs(
+    guest: &mut VmxSyscallMsrState,
+    host: VmxSyscallMsrState,
+    bank: &mut impl VmxSyscallMsrBank,
+) {
+    *guest = bank.read();
+    unsafe {
+        bank.write(host);
+    }
+}
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum VmCpuMode {
@@ -84,16 +147,9 @@ fn secondary_control_bits_allowed(bits: u32) -> bool {
     ((Msr::IA32_VMX_PROCBASED_CTLS2.read() >> 32) as u32 & bits) == bits
 }
 
-#[derive(Clone, Copy, Debug)]
-struct PendingEvent {
-    vector: u8,
-    err_code: Option<u32>,
-    level_triggered: bool,
-}
-
 /// A virtual CPU within a guest.
 #[repr(C)]
-pub struct VmxVcpu {
+pub struct VmxVcpu<H: X86HostOps> {
     // The order of `guest_regs`, `host_stack_top`, and `host_rflags` is
     // mandatory. They must be the first three fields. If you want to change
     // the order or the type of these fields, you must also change the assembly
@@ -111,27 +167,33 @@ pub struct VmxVcpu {
     /// Whether the VMCS has been launched. Used to determine whether to `vmx_launch` or `vmx_resume`.
     launched: bool,
     /// The guest entry point.
-    entry: Option<GuestPhysAddr>,
+    entry: Option<X86GuestPhysAddr>,
     /// The EPT root address.
-    nested_page_table_root: Option<HostPhysAddr>,
+    nested_page_table_root: Option<X86HostPhysAddr>,
+    /// Resolved device MMIO ranges decoded as emulated MMIO exits.
+    intercepted_mmio: Vec<X86InterceptedMmioRange>,
     // /// Whether this VCPU is a host VCpu. Used in type 1.5 hypervisor.
     // is_host: bool, temporary removed because we don't care about type 1.5 now
 
     // VMCS-related fields
     /// The VMCS region.
-    vmcs: VmxRegion,
+    vmcs: VmxRegion<H>,
     /// The I/O bitmap for the VMCS.
-    io_bitmap: IOBitmap,
+    io_bitmap: IOBitmap<H>,
     /// The MSR bitmap for the VMCS.
-    msr_bitmap: MsrBitmap,
+    msr_bitmap: MsrBitmap<H>,
 
     // Interrupt-related fields
     /// Pending events to be injected to the guest.
     pending_events: VecDeque<PendingEvent>,
     /// Emulated Local APIC.
-    vlapic: EmulatedLocalApic,
+    vlapic: EmulatedLocalApic<H>,
     /// Guest CR2 is not saved or restored by VMX hardware.
     guest_cr2: usize,
+    /// Guest syscall MSRs that are not saved or restored by VMX hardware.
+    guest_syscall_msrs: VmxSyscallMsrState,
+    /// Guest RAM regions used to read guest instructions and page tables.
+    guest_memory_regions: Vec<X86GuestMemoryRegion>,
 
     // Extra states
     /// The XState of the VCpu. Both host and guest.
@@ -143,9 +205,9 @@ pub struct VmxVcpu {
     guest_regs_exiting: GeneralRegisters,
 }
 
-impl VmxVcpu {
+impl<H: X86HostOps> VmxVcpu<H> {
     /// Create a new [`VmxVcpu`].
-    pub fn new(vm_id: VMId, vcpu_id: VCpuId) -> AxResult<Self> {
+    pub fn new(vm_id: usize, vcpu_id: usize) -> X86VcpuResult<Self> {
         let vmcs_revision_id = super::read_vmcs_revision_id();
         let vcpu = Self {
             guest_regs: GeneralRegisters::default(),
@@ -154,13 +216,16 @@ impl VmxVcpu {
             launched: false,
             entry: None,
             nested_page_table_root: None,
+            intercepted_mmio: Vec::new(),
             // is_host: false,
-            vmcs: VmxRegion::new(vmcs_revision_id, false)?,
-            io_bitmap: IOBitmap::passthrough_all()?,
-            msr_bitmap: MsrBitmap::passthrough_all()?,
+            vmcs: VmxRegion::<H>::new(vmcs_revision_id, false)?,
+            io_bitmap: IOBitmap::<H>::guest_owned()?,
+            msr_bitmap: MsrBitmap::<H>::passthrough_all()?,
             pending_events: VecDeque::with_capacity(8),
-            vlapic: EmulatedLocalApic::new(vm_id, vcpu_id),
+            vlapic: EmulatedLocalApic::<H>::new(vm_id, vcpu_id),
             guest_cr2: 0,
+            guest_syscall_msrs: VmxSyscallMsrState::default(),
+            guest_memory_regions: Vec::new(),
             xstate: XState::new(),
             #[cfg(feature = "tracing")]
             guest_regs_exiting: GeneralRegisters::default(),
@@ -169,23 +234,13 @@ impl VmxVcpu {
         Ok(vcpu)
     }
 
-    /// Set the new [`VmxVcpu`] context from guest OS.
-    pub fn setup(
-        &mut self,
-        nested_page_table_root: HostPhysAddr,
-        entry: GuestPhysAddr,
-    ) -> AxResult {
-        self.setup_vmcs(entry, nested_page_table_root, X86VCpuSetupConfig::default())?;
-        Ok(())
-    }
-
     // /// Get the identifier of this [`VmxVcpu`].
     // pub fn vcpu_id(&self) -> usize {
     //     get_current_vcpu::<Self>().unwrap().id()
     // }
 
     /// Bind this [`VmxVcpu`] to current logical processor.
-    pub fn bind_to_current_processor(&self) -> AxResult {
+    pub fn bind_to_current_processor(&self) -> X86VcpuResult {
         debug!(
             "VmxVcpu bind to current processor vmcs @ {:#x}",
             self.vmcs.phys_addr()
@@ -198,7 +253,7 @@ impl VmxVcpu {
     }
 
     /// Unbind this [`VmxVcpu`] from current logical processor.
-    pub fn unbind_from_current_processor(&self) -> AxResult {
+    pub fn unbind_from_current_processor(&self) -> X86VcpuResult {
         debug!(
             "VmxVcpu unbind from current processor vmcs @ {:#x}",
             self.vmcs.phys_addr()
@@ -230,11 +285,17 @@ impl VmxVcpu {
     }
 
     /// Run the guest. It returns when a vm-exit happens and returns the vm-exit if it cannot be handled by this [`VmxVcpu`] itself.
-    pub fn inner_run(&mut self) -> AxResult<Option<VmxExitInfo>> {
+    pub fn inner_run(&mut self) -> X86VcpuResult<Option<VmxExitInfo>> {
         self.inject_pending_events()?;
 
         // Run guest
         self.load_guest_xstate();
+        let mut syscall_msr_bank = HardwareVmxSyscallMsrBank;
+        // SAFETY: `X86Vcpu::run` requires its caller to pin the backend and disable host IRQs
+        // across the guest-entry window. This function restores the captured host state before
+        // returning to that caller.
+        let host_syscall_msrs =
+            unsafe { enter_guest_syscall_msrs(self.guest_syscall_msrs, &mut syscall_msr_bank) };
 
         #[cfg(feature = "tracing")]
         {
@@ -261,6 +322,15 @@ impl VmxVcpu {
                 self.vmx_launch();
             }
             self.guest_cr2 = cr2();
+        }
+        // SAFETY: this is the matching exit half of the entry above, still inside the same pinned,
+        // IRQ-disabled backend run window.
+        unsafe {
+            leave_guest_syscall_msrs(
+                &mut self.guest_syscall_msrs,
+                host_syscall_msrs,
+                &mut syscall_msr_bank,
+            );
         }
         self.load_host_xstate();
         restore_host_interrupt_flag(self.host_rflags);
@@ -290,32 +360,27 @@ impl VmxVcpu {
     }
 
     /// Basic information about VM exits.
-    pub fn exit_info(&self) -> AxResult<vmcs::VmxExitInfo> {
+    pub fn exit_info(&self) -> X86VcpuResult<vmcs::VmxExitInfo> {
         vmcs::exit_info()
     }
 
-    /// Raw information for VM Exits Due to Vectored Events, See SDM 25.9.2
-    pub fn raw_interrupt_exit_info(&self) -> AxResult<u32> {
-        vmcs::raw_interrupt_exit_info()
-    }
-
     /// Information for VM exits due to external interrupts.
-    pub fn interrupt_exit_info(&self) -> AxResult<vmcs::VmxInterruptInfo> {
+    pub fn interrupt_exit_info(&self) -> X86VcpuResult<vmcs::VmxInterruptInfo> {
         vmcs::interrupt_exit_info()
     }
 
     /// Information for VM exits due to I/O instructions.
-    pub fn io_exit_info(&self) -> AxResult<vmcs::VmxIoExitInfo> {
+    pub fn io_exit_info(&self) -> X86VcpuResult<vmcs::VmxIoExitInfo> {
         vmcs::io_exit_info()
     }
 
     /// Information for VM exits due to nested page table faults (EPT violation).
-    pub fn nested_page_fault_info(&self) -> AxResult<NestedPageFaultInfo> {
+    pub fn nested_page_fault_info(&self) -> X86VcpuResult<X86NestedPageFaultInfo> {
         vmcs::ept_violation_info()
     }
 
     /// Information for VM exits due to APIC access.
-    pub fn apic_access_exit_info(&self) -> AxResult<vmcs::ApicAccessExitInfo> {
+    pub fn apic_access_exit_info(&self) -> X86VcpuResult<vmcs::ApicAccessExitInfo> {
         vmcs::apic_access_exit_info()
     }
 
@@ -334,13 +399,8 @@ impl VmxVcpu {
         VmcsGuestNW::RSP.read().unwrap()
     }
 
-    /// Set guest stack pointer. (`RSP`)
-    pub fn set_stack_pointer(&mut self, rsp: usize) {
-        VmcsGuestNW::RSP.write(rsp).unwrap()
-    }
-
     /// Translate guest virtual addr to linear addr    
-    pub fn gla2gva(&self, guest_rip: GuestVirtAddr) -> GuestVirtAddr {
+    pub fn gla2gva(&self, guest_rip: X86GuestVirtAddr) -> X86GuestVirtAddr {
         let cpu_mode = self.get_cpu_mode();
         let seg_base = if cpu_mode == VmCpuMode::Mode64 {
             0
@@ -354,72 +414,15 @@ impl VmxVcpu {
         guest_rip + seg_base
     }
 
-    /// Get Translate guest page table info
-    pub fn get_ptw_info(&self) -> GuestPageWalkInfo {
-        let top_entry = VmcsGuestNW::CR3.read().unwrap();
-        let level = self.get_paging_level();
-        let is_write_access = false;
-        let is_inst_fetch = false;
-        let is_user_mode_access = ((VmcsGuest32::SS_ACCESS_RIGHTS.read().unwrap() >> 5) & 0x3) == 3;
-        let mut pse = true;
-        let mut nxe =
-            (VmcsGuest64::IA32_EFER.read().unwrap() & EferFlags::NO_EXECUTE_ENABLE.bits()) != 0;
-        let wp = (VmcsGuestNW::CR0.read().unwrap() & Cr0Flags::WRITE_PROTECT.bits() as usize) != 0;
-        let is_smap_on = (VmcsGuestNW::CR4.read().unwrap()
-            & Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION.bits() as usize)
-            != 0;
-        let is_smep_on = (VmcsGuestNW::CR4.read().unwrap()
-            & Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION.bits() as usize)
-            != 0;
-        let width: u32;
-        if level == 4 || level == 3 {
-            width = 9;
-        } else if level == 2 {
-            width = 10;
-            pse = VmcsGuestNW::CR4.read().unwrap() & Cr4Flags::PAGE_SIZE_EXTENSION.bits() as usize
-                != 0;
-            nxe = false;
-        } else {
-            width = 0;
-        }
-        GuestPageWalkInfo {
-            top_entry,
-            level,
-            width,
-            is_user_mode_access,
-            is_write_access,
-            is_inst_fetch,
-            pse,
-            wp,
-            nxe,
-            is_smap_on,
-            is_smep_on,
-        }
-    }
-
-    /// Guest rip. (`RIP`)
-    pub fn rip(&self) -> usize {
-        VmcsGuestNW::RIP.read().unwrap()
-    }
-
-    /// Guest cs. (`cs`)
-    pub fn cs(&self) -> u16 {
-        VmcsGuest16::CS_SELECTOR.read().unwrap()
-    }
-
     /// Advance guest `RIP` by `instr_len` bytes.
-    pub fn advance_rip(&mut self, instr_len: u8) -> AxResult {
+    pub fn advance_rip(&mut self, instr_len: u8) -> X86VcpuResult {
         VmcsGuestNW::RIP.write(VmcsGuestNW::RIP.read()? + instr_len as usize)
     }
 
     /// Add a virtual interrupt or exception to the pending events list,
     /// and try to inject it before later VM entries.
     pub fn queue_event(&mut self, vector: u8, err_code: Option<u32>) {
-        self.pending_events.push_back(PendingEvent {
-            vector,
-            err_code,
-            level_triggered: false,
-        });
+        self.queue_event_with_trigger(vector, err_code, false);
     }
 
     /// Add a virtual interrupt or exception with trigger mode metadata.
@@ -429,17 +432,20 @@ impl VmxVcpu {
         err_code: Option<u32>,
         level_triggered: bool,
     ) {
-        self.pending_events.push_back(PendingEvent {
-            vector,
-            err_code,
-            level_triggered,
-        });
+        queue_pending_event(
+            &mut self.pending_events,
+            PendingEvent {
+                vector,
+                err_code,
+                level_triggered,
+            },
+        );
     }
 
     /// If enable, a VM exit occurs at the beginning of any instruction if
     /// `RFLAGS.IF` = 1 and there are no other blocking of interrupts.
     /// (see SDM, Vol. 3C, Section 24.4.2)
-    pub fn set_interrupt_window(&mut self, enable: bool) -> AxResult {
+    pub fn set_interrupt_window(&mut self, enable: bool) -> X86VcpuResult {
         let mut ctrl = VmcsControl32::PRIMARY_PROCBASED_EXEC_CONTROLS.read()?;
         let bits = vmcs::controls::PrimaryControls::INTERRUPT_WINDOW_EXITING.bits();
         if enable {
@@ -450,24 +456,11 @@ impl VmxVcpu {
         VmcsControl32::PRIMARY_PROCBASED_EXEC_CONTROLS.write(ctrl)?;
         Ok(())
     }
-
-    /// Set I/O intercept by modifying I/O bitmap.
-    pub fn set_io_intercept_of_range(&mut self, port_base: u32, count: u32, intercept: bool) {
-        self.io_bitmap
-            .set_intercept_of_range(port_base, count, intercept)
-    }
-
-    /// Set msr intercept by modifying msr bitmap.
-    /// Todo: distinguish read and write.
-    pub fn set_msr_intercept_of_range(&mut self, msr: u32, intercept: bool) {
-        self.msr_bitmap.set_read_intercept(msr, intercept);
-        self.msr_bitmap.set_write_intercept(msr, intercept);
-    }
 }
 
 // Implementation of private methods
-impl VmxVcpu {
-    fn setup_io_bitmap(&mut self, config: X86VCpuSetupConfig) -> AxResult {
+impl<H: X86HostOps> VmxVcpu<H> {
+    fn setup_io_bitmap(&mut self, config: X86VcpuSetupConfig) -> X86VcpuResult {
         // By default, I/O bitmap is set as `intercept_all`.
         // Todo: these should be combined with emulated pio device management,
         // in `modules/axvm/src/device/x86_64/mod.rs` somehow.
@@ -481,14 +474,7 @@ impl VmxVcpu {
             .set_intercept_of_range(X86_PIT_PORT_BASE as u32, X86_PIT_PORT_COUNT, true);
         self.io_bitmap
             .set_intercept(X86_PIT_SPEAKER_PORT as u32, true);
-        if config.emulate_com1 {
-            self.io_bitmap.set_intercept_of_range(
-                X86_COM1_PORT_BASE as u32,
-                X86_COM1_PORT_COUNT,
-                true,
-            );
-        }
-        for range in config.passthrough_port_ranges() {
+        for range in config.intercepted_port_ranges() {
             self.io_bitmap
                 .set_intercept_of_range(range.base as u32, range.length as u32, true);
         }
@@ -496,7 +482,7 @@ impl VmxVcpu {
     }
 
     #[allow(dead_code)]
-    fn setup_msr_bitmap(&mut self) -> AxResult {
+    fn setup_msr_bitmap(&mut self) -> X86VcpuResult {
         // Intercept IA32_APIC_BASE MSR accesses
         const IA32_APIC_BASE: u32 = 0x1b;
         self.msr_bitmap.set_read_intercept(IA32_APIC_BASE, true);
@@ -520,10 +506,12 @@ impl VmxVcpu {
 
     fn setup_vmcs(
         &mut self,
-        entry: GuestPhysAddr,
-        nested_page_table_root: HostPhysAddr,
-        config: X86VCpuSetupConfig,
-    ) -> AxResult {
+        entry: X86GuestPhysAddr,
+        nested_page_table_root: X86HostPhysAddr,
+        config: X86VcpuSetupConfig,
+    ) -> X86VcpuResult {
+        self.guest_memory_regions = config.guest_memory_regions.clone();
+        self.intercepted_mmio = config.intercepted_mmio.clone();
         let paddr = self.vmcs.phys_addr().as_usize() as u64;
         unsafe {
             vmx::vmclear(paddr).map_err(as_axerr)?;
@@ -536,7 +524,7 @@ impl VmxVcpu {
         Ok(())
     }
 
-    fn setup_vmcs_host(&self) -> AxResult {
+    fn setup_vmcs_host(&self) -> X86VcpuResult {
         VmcsHost64::IA32_PAT.write(Msr::IA32_PAT.read())?;
         VmcsHost64::IA32_EFER.write(Msr::IA32_EFER.read())?;
 
@@ -573,7 +561,7 @@ impl VmxVcpu {
         Ok(())
     }
 
-    fn setup_vmcs_guest(&mut self, entry: GuestPhysAddr) -> AxResult {
+    fn setup_vmcs_guest(&mut self, entry: X86GuestPhysAddr) -> X86VcpuResult {
         let entry_state = x86_real_mode_entry_state(entry);
         let cr0_val: Cr0Flags =
             Cr0Flags::NOT_WRITE_THROUGH | Cr0Flags::CACHE_DISABLE | Cr0Flags::EXTENSION_TYPE;
@@ -634,11 +622,11 @@ impl VmxVcpu {
 
     fn setup_vmcs_control(
         &mut self,
-        nested_page_table_root: HostPhysAddr,
+        nested_page_table_root: X86HostPhysAddr,
         is_guest: bool,
-        config: X86VCpuSetupConfig,
-    ) -> AxResult {
-        // Intercept NMI and external interrupts.
+        config: X86VcpuSetupConfig,
+    ) -> X86VcpuResult {
+        // Intercept external interrupts and use the VMX preemption timer.
         use PinbasedControls as PinCtrl;
 
         use super::vmcs::controls::*;
@@ -648,10 +636,7 @@ impl VmxVcpu {
             VmcsControl32::PINBASED_EXEC_CONTROLS,
             Msr::IA32_VMX_TRUE_PINBASED_CTLS,
             Msr::IA32_VMX_PINBASED_CTLS.read() as u32,
-            (PinCtrl::NMI_EXITING
-                | PinCtrl::EXTERNAL_INTERRUPT_EXITING
-                | PinCtrl::VMX_PREEMPTION_TIMER)
-                .bits(),
+            (PinCtrl::EXTERNAL_INTERRUPT_EXITING | PinCtrl::VMX_PREEMPTION_TIMER).bits(),
             0,
         )?;
 
@@ -665,6 +650,7 @@ impl VmxVcpu {
             (CpuCtrl::USE_IO_BITMAPS
                 | CpuCtrl::USE_MSR_BITMAPS
                 | CpuCtrl::USE_TPR_SHADOW
+                | CpuCtrl::HLT_EXITING
                 | CpuCtrl::SECONDARY_CONTROLS)
                 .bits(),
             (CpuCtrl::CR3_LOAD_EXITING
@@ -756,8 +742,8 @@ impl VmxVcpu {
         // VmcsControlNW::CR4_GUEST_HOST_MASK.write(0)?;
         VmcsControl32::CR3_TARGET_COUNT.write(0)?;
 
-        // Pass-through exceptions (except #UD(6)), don't use I/O bitmap, set MSR bitmaps.
-        let exception_bitmap: u32 = 1 << 6;
+        // Pass through guest exceptions. Linux uses #UD (`ud2`) for BUG/WARN handling.
+        let exception_bitmap: u32 = 0;
 
         self.setup_io_bitmap(config)?;
 
@@ -768,7 +754,7 @@ impl VmxVcpu {
 
         VmcsControl64::VIRT_APIC_ADDR.write(self.vlapic.virtual_apic_page_addr().as_usize() as _)?;
         VmcsControl64::APIC_ACCESS_ADDR
-            .write(EmulatedLocalApic::virtual_apic_access_addr().as_usize() as _)?;
+            .write(EmulatedLocalApic::<H>::virtual_apic_access_addr().as_usize() as _)?;
         VmcsControl64::EOI_EXIT0.write(u64::MAX)?;
         VmcsControl64::EOI_EXIT1.write(u64::MAX)?;
         VmcsControl64::EOI_EXIT2.write(u64::MAX)?;
@@ -800,9 +786,9 @@ impl VmxVcpu {
 
 // Implementaton for type1.5 hypervisor
 // #[cfg(feature = "type1_5")]
-impl VmxVcpu {
+impl<H: X86HostOps> VmxVcpu<H> {
     fn set_cr(&mut self, cr_idx: usize, val: u64) {
-        (|| -> AxResult {
+        (|| -> X86VcpuResult {
             // debug!("set guest CR{} to val {:#x}", cr_idx, val);
             match cr_idx {
                 0 => {
@@ -841,7 +827,7 @@ impl VmxVcpu {
 
     #[allow(dead_code)]
     fn cr(&self, cr_idx: usize) -> usize {
-        (|| -> AxResult<usize> {
+        (|| -> X86VcpuResult<usize> {
             Ok(match cr_idx {
                 0 => VmcsGuestNW::CR0.read()?,
                 3 => VmcsGuestNW::CR3.read()?,
@@ -855,15 +841,6 @@ impl VmxVcpu {
         })()
         .expect("Failed to read guest control register")
     }
-}
-
-// The current VMX APIC-access decode path is used only with Axvisor's
-// identity-mapped guest RAM layout, so the guest physical address is also
-// the host physical address. A non-identity guest memory backend should
-// replace this helper with an explicit GPA-to-HVA translation.
-fn read_guest_phys_u64(gpa: usize) -> u64 {
-    let hva = host::phys_to_virt(HostPhysAddr::from(gpa));
-    unsafe { core::ptr::read_unaligned(hva.as_ptr() as *const u64) }
 }
 
 /// Get ready then vmlaunch or vmresume.
@@ -886,7 +863,7 @@ macro_rules! vmx_entry_with {
     }
 }
 
-impl VmxVcpu {
+impl<H: X86HostOps> VmxVcpu<H> {
     #[unsafe(naked)]
     /// Enter guest with vmlaunch.
     ///
@@ -938,7 +915,7 @@ impl VmxVcpu {
     }
 
     /// Try to inject a pending event before next VM entry.
-    fn inject_pending_events(&mut self) -> AxResult {
+    fn inject_pending_events(&mut self) -> X86VcpuResult {
         if let Some(event) = self.pending_events.front() {
             // trace!(
             //     "pending event vector {:#x} allow_int {}",
@@ -961,7 +938,7 @@ impl VmxVcpu {
         Ok(())
     }
 
-    fn handle_interrupt_window(&mut self) -> AxResult {
+    fn handle_interrupt_window(&mut self) -> X86VcpuResult {
         self.set_interrupt_window(false)?;
         self.inject_pending_events()
     }
@@ -969,7 +946,7 @@ impl VmxVcpu {
     /// Handle vm-exits than can and should be handled by [`VmxVcpu`] itself.
     ///
     /// Return the result or None if the vm-exit was not handled.
-    fn builtin_vmexit_handler(&mut self, exit_info: &VmxExitInfo) -> Option<AxResult> {
+    fn builtin_vmexit_handler(&mut self, exit_info: &VmxExitInfo) -> Option<X86VcpuResult> {
         const APIC_BASE_MSR: u32 = 0x1b;
         const AMD64_DE_CFG: u32 = 0xc001_1029;
         // Following vm-exits are handled here:
@@ -1006,7 +983,7 @@ impl VmxVcpu {
         self.regs_mut().rdx = val >> 32;
     }
 
-    fn handle_apic_base_msr_access(&mut self, write: bool) -> AxResult {
+    fn handle_apic_base_msr_access(&mut self, write: bool) -> X86VcpuResult {
         const VMEXIT_INSTR_LEN_RDMSR_WRMSR: u8 = 2;
 
         self.advance_rip(VMEXIT_INSTR_LEN_RDMSR_WRMSR)?;
@@ -1014,7 +991,9 @@ impl VmxVcpu {
         if write {
             let value = self.read_edx_eax();
             trace!("handle_vlapic_apic_base_write: value={value:#x}");
-            self.vlapic.set_apic_base(value)
+            self.vlapic
+                .set_apic_base(value)
+                .map_err(|_| X86VcpuError::BadState)
         } else {
             let value = self.vlapic.apic_base();
             trace!("handle_vlapic_apic_base_read: value={value:#x}");
@@ -1023,7 +1002,7 @@ impl VmxVcpu {
         }
     }
 
-    fn handle_apic_msr_access(&mut self, write: bool, msr: u32) -> AxResult<VmExit> {
+    fn handle_apic_msr_access(&mut self, write: bool, msr: u32) -> X86VcpuResult<X86VmExit> {
         const VMEXIT_INSTR_LEN_RDMSR_WRMSR: u8 = 2;
 
         self.advance_rip(VMEXIT_INSTR_LEN_RDMSR_WRMSR)?;
@@ -1035,33 +1014,36 @@ impl VmxVcpu {
             trace!("handle_vlapic_msr_write: msr={msr:#x}, value={value:#x}");
 
             if msr == X2APIC_EOI_MSR {
-                Ok(VmExit::InterruptEnd {
+                Ok(X86VmExit::InterruptEnd {
                     vector: self.vlapic.handle_eoi(),
                 })
             } else {
-                <EmulatedLocalApic as BaseDeviceOps<SysRegAddrRange>>::handle_write(
-                    &self.vlapic,
-                    SysRegAddr::new(reg),
-                    AccessWidth::Qword,
-                    value,
-                )?;
-                Ok(VmExit::Nothing)
+                self.vlapic
+                    .handle_msr_write(
+                        x86_vlapic::X86MsrAddr::new(reg),
+                        x86_vlapic::X86AccessWidth::Qword,
+                        value,
+                    )
+                    .map_err(|_| X86VcpuError::BadState)?;
+                Ok(X86VmExit::Nothing)
             }
         } else {
-            let value = <EmulatedLocalApic as BaseDeviceOps<SysRegAddrRange>>::handle_read(
-                &self.vlapic,
-                SysRegAddr::new(reg),
-                AccessWidth::Qword,
-            )? as u64;
+            let value = self
+                .vlapic
+                .handle_msr_read(
+                    x86_vlapic::X86MsrAddr::new(reg),
+                    x86_vlapic::X86AccessWidth::Qword,
+                )
+                .map_err(|_| X86VcpuError::BadState)? as u64;
 
             trace!("handle_vlapic_msr_read: msr={msr:#x}, value={value:#x}");
 
             self.write_edx_eax(value);
-            Ok(VmExit::Nothing)
+            Ok(X86VmExit::Nothing)
         }
     }
 
-    fn handle_amd64_de_cfg_msr_access(&mut self, write: bool) -> AxResult {
+    fn handle_amd64_de_cfg_msr_access(&mut self, write: bool) -> X86VcpuResult {
         const VMEXIT_INSTR_LEN_RDMSR_WRMSR: u8 = 2;
 
         self.advance_rip(VMEXIT_INSTR_LEN_RDMSR_WRMSR)?;
@@ -1071,45 +1053,47 @@ impl VmxVcpu {
         Ok(())
     }
 
-    fn handle_apic_access(&mut self, exit_info: &VmxExitInfo) -> AxResult<VmExit> {
+    fn handle_apic_access(&mut self, exit_info: &VmxExitInfo) -> X86VcpuResult<X86VmExit> {
         let apic_access_exit_info = self.apic_access_exit_info()?;
 
         let write = match apic_access_exit_info.access_type {
             ApicAccessExitType::LinearDataWrite => true,
             ApicAccessExitType::LinearDataRead => false,
             _ => {
-                warn!(
-                    "Unsupported APIC access type: {:?}",
+                debug!(
+                    "Ignoring non-data APIC access type: {:?}",
                     apic_access_exit_info.access_type
                 );
-                return ax_err!(BadState, "Unsupported APIC access type");
+                return Ok(X86VmExit::Nothing);
             }
         };
 
         let reg = apic_access_exit_info.offset as usize;
-        let addr = GuestPhysAddr::from(X86_APIC_ACCESS_GPA + reg);
-        let mut exit_reason = VmExit::Nothing;
+        let addr = X86GuestPhysAddr::from(X86_LOCAL_APIC_GPA + reg);
+        let mut exit_reason = X86VmExit::Nothing;
         if write {
             let value = self.decode_apic_mmio_write_value(exit_info)?;
             if reg == X86_LOCAL_APIC_EOI_OFFSET {
-                exit_reason = VmExit::InterruptEnd {
+                exit_reason = X86VmExit::InterruptEnd {
                     vector: self.vlapic.handle_eoi(),
                 };
             } else {
-                <EmulatedLocalApic as BaseDeviceOps<AddrRange<GuestPhysAddr>>>::handle_write(
-                    &self.vlapic,
-                    addr,
-                    AccessWidth::Dword,
-                    value,
-                )?;
+                self.vlapic
+                    .handle_mmio_write(
+                        x86_vlapic::X86GuestPhysAddr::from_usize(addr.as_usize()),
+                        x86_vlapic::X86AccessWidth::Dword,
+                        value,
+                    )
+                    .map_err(|_| X86VcpuError::BadState)?;
             }
         } else {
-            let value =
-                <EmulatedLocalApic as BaseDeviceOps<AddrRange<GuestPhysAddr>>>::handle_read(
-                    &self.vlapic,
-                    addr,
-                    AccessWidth::Dword,
-                )?;
+            let value = self
+                .vlapic
+                .handle_mmio_read(
+                    x86_vlapic::X86GuestPhysAddr::from_usize(addr.as_usize()),
+                    x86_vlapic::X86AccessWidth::Dword,
+                )
+                .map_err(|_| X86VcpuError::BadState)?;
             self.regs_mut().rax = value as u64;
         }
 
@@ -1117,11 +1101,12 @@ impl VmxVcpu {
         Ok(exit_reason)
     }
 
-    fn decode_apic_mmio_write_value(&self, exit_info: &VmxExitInfo) -> AxResult<usize> {
-        let mut rip = self.gla2gva(GuestVirtAddr::from(exit_info.guest_rip));
+    fn decode_apic_mmio_write_value(&self, exit_info: &VmxExitInfo) -> X86VcpuResult<usize> {
+        let mut rip = self.gla2gva(X86GuestVirtAddr::from(exit_info.guest_rip));
         let mut rex = 0u8;
+        let mut _operand_size_override = false;
 
-        Self::skip_simple_prefixes(self, &mut rip, &mut rex)?;
+        Self::skip_simple_prefixes(self, &mut rip, &mut rex, &mut _operand_size_override)?;
 
         let opcode = self.read_guest_u8(rip)?;
         rip += 1;
@@ -1129,7 +1114,7 @@ impl VmxVcpu {
         rip += 1;
         let mode = modrm >> 6;
         if mode == 0b11 {
-            return ax_err!(Unsupported, "APIC MMIO write destination is not memory");
+            return x86_err!(Unsupported, "APIC MMIO write destination is not memory");
         }
 
         if opcode == 0x89 {
@@ -1146,7 +1131,7 @@ impl VmxVcpu {
             return Ok(value as usize);
         }
 
-        ax_err!(
+        x86_err!(
             Unsupported,
             format_args!("unsupported APIC MMIO write opcode {opcode:#x}")
         )
@@ -1155,25 +1140,28 @@ impl VmxVcpu {
     fn decode_ept_mmio_access(
         &mut self,
         exit_info: &VmxExitInfo,
-        addr: GuestPhysAddr,
+        addr: X86GuestPhysAddr,
         write: bool,
-    ) -> Option<(VmExit, u8)> {
-        // Keep EPT-violation MMIO decoding scoped to the PC APIC windows used
-        // by the current x86 Linux direct-boot path. The VMX exit qualification
-        // alone does not tell us whether an unmapped GPA is an emulated device
-        // or a genuine missing memory mapping.
+    ) -> Option<(X86VmExit, u8)> {
         let addr_usize = addr.as_usize();
         let local_apic =
-            (X86_APIC_ACCESS_GPA..X86_APIC_ACCESS_GPA + X86_LOCAL_APIC_SIZE).contains(&addr_usize);
+            (X86_LOCAL_APIC_GPA..X86_LOCAL_APIC_GPA + X86_LOCAL_APIC_SIZE).contains(&addr_usize);
         let ioapic = (X86_IOAPIC_BASE..X86_IOAPIC_BASE + X86_IOAPIC_SIZE).contains(&addr_usize);
-        if !local_apic && !ioapic {
+        let device_mmio = self
+            .intercepted_mmio
+            .iter()
+            .any(|range| range.contains(addr));
+        if !local_apic && !ioapic && !device_mmio {
             return None;
         }
 
-        let start = self.gla2gva(GuestVirtAddr::from(exit_info.guest_rip));
+        let start = self.gla2gva(X86GuestVirtAddr::from(exit_info.guest_rip));
         let mut rip = start;
         let mut rex = 0u8;
-        if let Err(err) = Self::skip_simple_prefixes(self, &mut rip, &mut rex) {
+        let mut operand_size_override = false;
+        if let Err(err) =
+            Self::skip_simple_prefixes(self, &mut rip, &mut rex, &mut operand_size_override)
+        {
             debug!("failed to decode EPT MMIO prefixes: {err:?}");
             return None;
         }
@@ -1187,12 +1175,120 @@ impl VmxVcpu {
             return None;
         }
 
+        if local_apic || ioapic {
+            return self.decode_ept_apic_mmio_access(crate::decode::X86ApicMmioDecode {
+                start,
+                rip,
+                modrm,
+                rex,
+                opcode,
+                addr,
+                write,
+                local_apic,
+            });
+        }
+
+        let rex_w = rex & 0x8 != 0;
+        match (write, opcode) {
+            (true, 0x88) => {
+                let byte_reg = crate::decode::x86_byte_register((modrm >> 3) & 0x7, rex)?;
+                let end = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
+                let data = self.read_byte_register(byte_reg)?;
+                let exit = crate::decode::mov_mmio_write_exit(
+                    addr,
+                    opcode,
+                    operand_size_override,
+                    rex_w,
+                    data,
+                )?;
+                Some((exit, (end.as_usize() - start.as_usize()) as u8))
+            }
+            (true, 0x89) => {
+                let reg = ((modrm >> 3) & 0x7) | ((rex & 0x4) << 1);
+                let end = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
+                let data = if reg == 4 {
+                    self.read_rsp()?
+                } else {
+                    self.guest_regs.get_reg_of_index(reg)
+                };
+                let exit = crate::decode::mov_mmio_write_exit(
+                    addr,
+                    opcode,
+                    operand_size_override,
+                    rex_w,
+                    data,
+                )?;
+                Some((exit, (end.as_usize() - start.as_usize()) as u8))
+            }
+            (true, 0xc6 | 0xc7) if (modrm >> 3) & 0x7 == 0 => {
+                let width = X86AccessWidth::for_mov_opcode(opcode, operand_size_override, rex_w)?;
+                let imm_addr = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
+                let data = self.read_mmio_immediate(imm_addr, width).ok()?;
+                let exit = self.handle_decoded_ept_mmio_write(addr, data, false, width)?;
+                let instr_len = imm_addr.as_usize() + crate::decode::mov_immediate_size(width)
+                    - start.as_usize();
+                Some((exit, instr_len as u8))
+            }
+            (false, 0x8a) => {
+                let byte_reg = crate::decode::x86_byte_register((modrm >> 3) & 0x7, rex)?;
+                let end = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
+                let exit = X86VmExit::MmioRead {
+                    addr,
+                    width: X86AccessWidth::Byte,
+                    reg: byte_reg.gpr as usize,
+                    reg_width: X86AccessWidth::Byte,
+                    signed_ext: false,
+                    byte_reg: Some(byte_reg),
+                };
+                Some((exit, (end.as_usize() - start.as_usize()) as u8))
+            }
+            (false, 0x8b) => {
+                let width = X86AccessWidth::for_mov_opcode(opcode, operand_size_override, rex_w)?;
+                let reg = (((modrm >> 3) & 0x7) | ((rex & 0x4) << 1)) as usize;
+                let end = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
+                let exit = X86VmExit::MmioRead {
+                    addr,
+                    width,
+                    reg,
+                    reg_width: width,
+                    signed_ext: false,
+                    byte_reg: None,
+                };
+                Some((exit, (end.as_usize() - start.as_usize()) as u8))
+            }
+            _ => {
+                debug!("unsupported EPT MMIO opcode {opcode:#x}, write={write}");
+                None
+            }
+        }
+    }
+
+    fn decode_ept_apic_mmio_access(
+        &mut self,
+        decode: crate::decode::X86ApicMmioDecode,
+    ) -> Option<(X86VmExit, u8)> {
+        let crate::decode::X86ApicMmioDecode {
+            start,
+            rip,
+            modrm,
+            rex,
+            opcode,
+            addr,
+            write,
+            local_apic,
+        } = decode;
+
         match (write, opcode) {
             (true, 0x89) => {
                 let reg = ((modrm >> 3) & 0x7) | ((rex & 0x4) << 1);
                 let end = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
                 let data = self.guest_regs.get_reg_of_index(reg) as u32 as u64;
-                let exit = self.handle_decoded_ept_mmio_write(addr, data, local_apic)?;
+                let exit = self.handle_decoded_ept_mmio_write(
+                    addr,
+                    data,
+                    local_apic,
+                    X86AccessWidth::Dword,
+                )?;
                 Some((exit, (end.as_usize() - start.as_usize()) as u8))
             }
             (true, 0xc7) if (modrm >> 3) & 0x7 == 0 => {
@@ -1201,7 +1297,12 @@ impl VmxVcpu {
                 for i in 0..size_of::<u32>() {
                     data |= (self.read_guest_u8(imm_addr + i).ok()? as u32) << (i * 8);
                 }
-                let exit = self.handle_decoded_ept_mmio_write(addr, data as u64, local_apic)?;
+                let exit = self.handle_decoded_ept_mmio_write(
+                    addr,
+                    data as u64,
+                    local_apic,
+                    X86AccessWidth::Dword,
+                )?;
                 Some((
                     exit,
                     (imm_addr.as_usize() + size_of::<u32>() - start.as_usize()) as u8,
@@ -1211,23 +1312,24 @@ impl VmxVcpu {
                 let reg = (((modrm >> 3) & 0x7) | ((rex & 0x4) << 1)) as usize;
                 let end = self.skip_modrm_memory_operand(rip, modrm, rex).ok()?;
                 let exit = if local_apic {
-                    let val =
-                        <EmulatedLocalApic as BaseDeviceOps<AddrRange<GuestPhysAddr>>>::handle_read(
-                            &self.vlapic,
-                            addr,
-                            AccessWidth::Dword,
+                    let val = self
+                        .vlapic
+                        .handle_mmio_read(
+                            x86_vlapic::X86GuestPhysAddr::from_usize(addr.as_usize()),
+                            x86_vlapic::X86AccessWidth::Dword,
                         )
                         .ok()?;
                     self.regs_mut()
                         .set_reg_of_index(reg as u8, val as u32 as u64);
-                    VmExit::Nothing
+                    X86VmExit::Nothing
                 } else {
-                    VmExit::MmioRead {
+                    X86VmExit::MmioRead {
                         addr,
-                        width: AccessWidth::Dword,
+                        width: X86AccessWidth::Dword,
                         reg,
-                        reg_width: AccessWidth::Dword,
+                        reg_width: X86AccessWidth::Dword,
                         signed_ext: false,
+                        byte_reg: None,
                     }
                 };
                 Some((exit, (end.as_usize() - start.as_usize()) as u8))
@@ -1239,44 +1341,120 @@ impl VmxVcpu {
         }
     }
 
+    fn read_mmio_immediate(
+        &self,
+        imm_addr: X86GuestVirtAddr,
+        width: X86AccessWidth,
+    ) -> X86VcpuResult<u64> {
+        match width {
+            X86AccessWidth::Byte => Ok(self.read_guest_u8(imm_addr)? as u64),
+            X86AccessWidth::Word => {
+                let mut data = 0u64;
+                for i in 0..size_of::<u16>() {
+                    data |= (self.read_guest_u8(imm_addr + i)? as u64) << (i * 8);
+                }
+                Ok(data)
+            }
+            X86AccessWidth::Dword => {
+                let mut data = 0u64;
+                for i in 0..size_of::<u32>() {
+                    data |= (self.read_guest_u8(imm_addr + i)? as u64) << (i * 8);
+                }
+                Ok(data)
+            }
+            X86AccessWidth::Qword => {
+                // C7 with REX.W still encodes a 32-bit immediate; the CPU
+                // sign-extends it to 64 bits before storing.
+                let mut imm = 0u32;
+                for i in 0..size_of::<u32>() {
+                    imm |= (self.read_guest_u8(imm_addr + i)? as u32) << (i * 8);
+                }
+                Ok((imm as i32) as i64 as u64)
+            }
+        }
+    }
+
+    fn read_byte_register(&self, byte_reg: X86ByteRegister) -> Option<u64> {
+        if byte_reg.gpr == 4 {
+            return Some((VmcsGuestNW::RSP.read().ok()? as u64) & 0xff);
+        }
+        let value = self.guest_regs.get_reg_of_index(byte_reg.gpr);
+        Some(u64::from(crate::decode::x86_byte_register_value(
+            value, byte_reg,
+        )))
+    }
+
+    fn read_rsp(&self) -> Option<u64> {
+        Some(VmcsGuestNW::RSP.read().ok()? as u64)
+    }
+
+    fn write_rsp(&mut self, value: u64) -> X86VcpuResult {
+        VmcsGuestNW::RSP.write(value as usize)
+    }
+
+    fn write_byte_register(&mut self, byte_reg: X86ByteRegister, value: u8) -> X86VcpuResult {
+        if byte_reg.gpr == 4 {
+            let old = VmcsGuestNW::RSP.read()?;
+            VmcsGuestNW::RSP.write((old & !0xff) | usize::from(value))?;
+            return Ok(());
+        }
+        let gpr = byte_reg.gpr;
+        let old = self.guest_regs.get_reg_of_index(gpr);
+        let new = crate::decode::x86_byte_register_merge(old, byte_reg, value);
+        self.regs_mut().set_reg_of_index(gpr, new);
+        Ok(())
+    }
+
+    fn write_word_register(&mut self, reg: usize, value: u16) -> X86VcpuResult {
+        if reg == 4 {
+            let old = VmcsGuestNW::RSP.read()?;
+            let merged = crate::decode::x86_word_register_merge(old as u64, value);
+            VmcsGuestNW::RSP.write(merged as usize)?;
+            return Ok(());
+        }
+        let old = self.guest_regs.get_reg_of_index(reg as u8);
+        let new = crate::decode::x86_word_register_merge(old, value);
+        self.regs_mut().set_reg_of_index(reg as u8, new);
+        Ok(())
+    }
+
     fn handle_decoded_ept_mmio_write(
         &mut self,
-        addr: GuestPhysAddr,
+        addr: X86GuestPhysAddr,
         data: u64,
         local_apic: bool,
-    ) -> Option<VmExit> {
+        width: X86AccessWidth,
+    ) -> Option<X86VmExit> {
         if !local_apic {
-            return Some(VmExit::MmioWrite {
-                addr,
-                width: AccessWidth::Dword,
-                data,
-            });
+            return Some(X86VmExit::MmioWrite { addr, width, data });
         }
 
-        let offset = addr.as_usize() - X86_APIC_ACCESS_GPA;
+        let offset = addr.as_usize() - X86_LOCAL_APIC_GPA;
         if offset == X86_LOCAL_APIC_EOI_OFFSET {
-            return Some(VmExit::InterruptEnd {
+            return Some(X86VmExit::InterruptEnd {
                 vector: self.vlapic.handle_eoi(),
             });
         }
 
-        <EmulatedLocalApic as BaseDeviceOps<AddrRange<GuestPhysAddr>>>::handle_write(
-            &self.vlapic,
-            addr,
-            AccessWidth::Dword,
-            data as usize,
-        )
-        .ok()?;
-        Some(VmExit::Nothing)
+        self.vlapic
+            .handle_mmio_write(
+                x86_vlapic::X86GuestPhysAddr::from_usize(addr.as_usize()),
+                x86_vlapic::X86AccessWidth::Dword,
+                data as usize,
+            )
+            .ok()?;
+        Some(X86VmExit::Nothing)
     }
 
-    fn skip_simple_prefixes(&self, rip: &mut GuestVirtAddr, rex: &mut u8) -> AxResult {
+    fn skip_simple_prefixes(
+        &self,
+        rip: &mut X86GuestVirtAddr,
+        rex: &mut u8,
+        operand_size_override: &mut bool,
+    ) -> X86VcpuResult {
         loop {
             let byte = self.read_guest_u8(*rip)?;
-            if byte == 0x66 {
-                *rip += 1;
-            } else if (0x40..=0x4f).contains(&byte) {
-                *rex = byte;
+            if crate::decode::x86_simple_prefix_update(byte, rex, operand_size_override) {
                 *rip += 1;
             } else {
                 return Ok(());
@@ -1286,53 +1464,86 @@ impl VmxVcpu {
 
     fn skip_modrm_memory_operand(
         &self,
-        mut cursor: GuestVirtAddr,
+        mut cursor: X86GuestVirtAddr,
         modrm: u8,
         rex: u8,
-    ) -> AxResult<GuestVirtAddr> {
-        let mode = modrm >> 6;
+    ) -> X86VcpuResult<X86GuestVirtAddr> {
         let rm = modrm & 0x7;
+        let mut sib = None;
 
         if rm == 0b100 {
-            let sib = self.read_guest_u8(cursor)?;
+            let byte = self.read_guest_u8(cursor)?;
             cursor += 1;
-            let base = sib & 0x7;
-            if mode == 0 && base == 0b101 {
-                cursor += size_of::<u32>();
-            }
-        } else if mode == 0 && rm == 0b101 && rex & 0x1 == 0 {
-            cursor += size_of::<u32>();
+            sib = Some(byte);
         }
 
-        match mode {
-            0 => {}
-            1 => cursor += size_of::<u8>(),
-            2 => cursor += size_of::<u32>(),
-            _ => return ax_err!(InvalidInput, "ModRM register operand is not memory"),
-        }
+        let disp_size = crate::decode::x86_modrm_displacement_size(modrm, sib, rex)
+            .ok_or_else(|| x86_err_type!(InvalidInput, "ModRM register operand is not memory"))?;
+        cursor += disp_size;
 
         Ok(cursor)
     }
 
-    fn read_guest_u8(&self, gva: GuestVirtAddr) -> AxResult<u8> {
+    fn read_guest_u8(&self, gva: X86GuestVirtAddr) -> X86VcpuResult<u8> {
         let gpa = self.translate_guest_linear(gva)?;
-        let hva = host::phys_to_virt(HostPhysAddr::from(gpa.as_usize()));
-        Ok(unsafe { core::ptr::read_volatile(hva.as_ptr()) })
+        self.read_guest_phys_u8(gpa)
     }
 
-    fn translate_guest_linear(&self, gva: GuestVirtAddr) -> AxResult<GuestPhysAddr> {
+    fn guest_phys_to_host_virt(&self, gpa: X86GuestPhysAddr) -> X86VcpuResult<usize> {
+        let gpa = gpa.as_usize();
+        self.guest_memory_regions
+            .iter()
+            .find_map(|region| {
+                let start = region.gpa.as_usize();
+                let offset = gpa.checked_sub(start)?;
+                if offset < region.size {
+                    region.hva.as_usize().checked_add(offset)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                x86_err_type!(
+                    InvalidInput,
+                    format_args!("guest physical address {gpa:#x} is not backed by RAM")
+                )
+            })
+    }
+
+    fn read_guest_phys_u8(&self, gpa: X86GuestPhysAddr) -> X86VcpuResult<u8> {
+        if self.guest_memory_regions.is_empty() {
+            return host::read_guest_u8::<H>(gpa);
+        }
+
+        let hva = self.guest_phys_to_host_virt(gpa)?;
+        Ok(unsafe { core::ptr::read_volatile(hva as *const u8) })
+    }
+
+    fn read_guest_phys_u64(&self, gpa: X86GuestPhysAddr) -> X86VcpuResult<u64> {
+        let mut bytes = [0u8; 8];
+        for (offset, byte) in bytes.iter_mut().enumerate() {
+            let addr = gpa
+                .as_usize()
+                .checked_add(offset)
+                .ok_or(X86VcpuError::InvalidInput)?;
+            *byte = self.read_guest_phys_u8(X86GuestPhysAddr::from_usize(addr))?;
+        }
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn translate_guest_linear(&self, gva: X86GuestVirtAddr) -> X86VcpuResult<X86GuestPhysAddr> {
         let addr = gva.as_usize();
         match self.get_paging_level() {
-            0 => Ok(GuestPhysAddr::from(addr)),
+            0 => Ok(X86GuestPhysAddr::from(addr)),
             4 => self.walk_guest_page_table_4level(addr),
-            level => ax_err!(
+            level => x86_err!(
                 Unsupported,
                 format_args!("unsupported APIC MMIO write decode paging level {level}")
             ),
         }
     }
 
-    fn walk_guest_page_table_4level(&self, gva: usize) -> AxResult<GuestPhysAddr> {
+    fn walk_guest_page_table_4level(&self, gva: usize) -> X86VcpuResult<X86GuestPhysAddr> {
         const PRESENT: u64 = 1 << 0;
         const HUGE_PAGE: u64 = 1 << 7;
         const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
@@ -1349,9 +1560,10 @@ impl VmxVcpu {
         ];
 
         for (level, index) in indexes.into_iter().enumerate() {
-            let entry = read_guest_phys_u64(table + index * size_of::<u64>());
+            let entry =
+                self.read_guest_phys_u64(X86GuestPhysAddr::from(table + index * size_of::<u64>()))?;
             if entry & PRESENT == 0 {
-                return ax_err!(
+                return x86_err!(
                     InvalidInput,
                     format_args!("guest RIP page table entry is not present at level {level}")
                 );
@@ -1360,20 +1572,20 @@ impl VmxVcpu {
             let paddr = (entry & ADDR_MASK) as usize;
             match level {
                 1 if entry & HUGE_PAGE != 0 => {
-                    return Ok(GuestPhysAddr::from(paddr + (gva & PAGE_1G_MASK)));
+                    return Ok(X86GuestPhysAddr::from(paddr + (gva & PAGE_1G_MASK)));
                 }
                 2 if entry & HUGE_PAGE != 0 => {
-                    return Ok(GuestPhysAddr::from(paddr + (gva & PAGE_2M_MASK)));
+                    return Ok(X86GuestPhysAddr::from(paddr + (gva & PAGE_2M_MASK)));
                 }
-                3 => return Ok(GuestPhysAddr::from(paddr + (gva & PAGE_4K_MASK))),
+                3 => return Ok(X86GuestPhysAddr::from(paddr + (gva & PAGE_4K_MASK))),
                 _ => table = paddr,
             }
         }
 
-        ax_err!(InvalidInput, "failed to translate guest RIP")
+        x86_err!(InvalidInput, "failed to translate guest RIP")
     }
 
-    fn handle_vmx_preemption_timer(&mut self) -> AxResult {
+    fn handle_vmx_preemption_timer(&mut self) -> X86VcpuResult {
         // The VMX-preemption timer counts down at rate proportional to that of the timestamp counter (TSC).
         // Specifically, the timer counts down by 1 every time bit X in the TSC changes due to a TSC increment.
         // The value of X is in the range 0–31 and can be determined by consulting the VMX capability MSR IA32_VMX_MISC (see Appendix A.6).
@@ -1382,7 +1594,7 @@ impl VmxVcpu {
     }
 
     #[allow(clippy::single_match)]
-    fn handle_cr(&mut self) -> AxResult {
+    fn handle_cr(&mut self) -> X86VcpuResult {
         const VM_EXIT_INSTR_LEN_MV_TO_CR: u8 = 3;
 
         let cr_access_info = vmcs::cr_access_info()?;
@@ -1418,7 +1630,7 @@ impl VmxVcpu {
         );
     }
 
-    fn handle_cpuid(&mut self) -> AxResult {
+    fn handle_cpuid(&mut self) -> X86VcpuResult {
         use raw_cpuid::{CpuIdResult, cpuid};
 
         const VM_EXIT_INSTR_LEN_CPUID: u8 = 2;
@@ -1496,7 +1708,7 @@ impl VmxVcpu {
                 let mut res = cpuid!(regs_clone.rax, regs_clone.rcx);
                 if res.eax == 0 {
                     let frequency_mhz =
-                        crate::host_tsc_frequency_mhz().unwrap_or(FALLBACK_TSC_FREQUENCY_MHZ);
+                        crate::host_tsc_frequency_mhz::<H>().unwrap_or(FALLBACK_TSC_FREQUENCY_MHZ);
                     warn!(
                         "handle_cpuid: Failed to get TSC frequency by CPUID, default to \
                          {frequency_mhz} MHz"
@@ -1523,7 +1735,7 @@ impl VmxVcpu {
         Ok(())
     }
 
-    fn handle_xsetbv(&mut self) -> AxResult {
+    fn handle_xsetbv(&mut self) -> X86VcpuResult {
         const XCR_XCR0: u64 = 0;
         const VM_EXIT_INSTR_LEN_XSETBV: u8 = 3;
 
@@ -1562,14 +1774,14 @@ impl VmxVcpu {
 
                     Some(x)
                 })
-                .ok_or_else(|| ax_err_type!(InvalidInput))
+                .ok_or(x86_err_type!(InvalidInput))
                 .and_then(|x| {
                     self.xstate.guest_xcr0 = x.bits();
                     self.advance_rip(VM_EXIT_INSTR_LEN_XSETBV)
                 })
         } else {
             // xcr0 only
-            ax_err!(Unsupported, "only xcr0 is supported")
+            x86_err!(Unsupported, "only xcr0 is supported")
         }
     }
 
@@ -1582,7 +1794,7 @@ impl VmxVcpu {
     }
 }
 
-impl Drop for VmxVcpu {
+impl<H: X86HostOps> Drop for VmxVcpu<H> {
     fn drop(&mut self) {
         unsafe { vmx::vmclear(self.vmcs.phys_addr().as_usize() as u64).unwrap() };
         info!("[HV] dropped VmxVcpu(vmcs: {:#x})", self.vmcs.phys_addr());
@@ -1605,9 +1817,9 @@ fn get_tr_base(tr: SegmentSelector, gdt: &DescriptorTablePointer<u64>) -> u64 {
     }
 }
 
-impl Debug for VmxVcpu {
+impl<H: X86HostOps> Debug for VmxVcpu<H> {
     fn fmt(&self, f: &mut Formatter) -> Result {
-        (|| -> AxResult<Result> {
+        (|| -> X86VcpuResult<Result> {
             Ok(f.debug_struct("VmxVcpu")
                 .field("guest_regs", &self.guest_regs)
                 .field("rip", &VmcsGuestNW::RIP.read()?)
@@ -1626,38 +1838,169 @@ impl Debug for VmxVcpu {
     }
 }
 
-impl VmArchVcpuOps for VmxVcpu {
-    type CreateConfig = X86VCpuCreateConfig;
-
-    type SetupConfig = X86VCpuSetupConfig;
-    type Exit = VmExit;
-
-    fn new(vm_id: VMId, vcpu_id: VCpuId, _config: Self::CreateConfig) -> AxResult<Self> {
+impl<H: X86HostOps> VmxVcpu<H> {
+    pub fn new_with_config(
+        vm_id: usize,
+        vcpu_id: usize,
+        _config: X86VcpuCreateConfig,
+    ) -> X86VcpuResult<Self> {
         Self::new(vm_id, vcpu_id)
     }
 
-    fn set_entry(&mut self, entry: GuestPhysAddr) -> AxResult {
+    pub fn set_entry(&mut self, entry: X86GuestPhysAddr) -> X86VcpuResult {
         self.entry = Some(entry);
         Ok(())
     }
 
-    fn set_nested_page_table(&mut self, config: NestedPagingConfig) -> AxResult {
+    pub fn set_nested_page_table(&mut self, config: X86NestedPagingConfig) -> X86VcpuResult {
         self.nested_page_table_root = Some(config.root_paddr);
         Ok(())
     }
 
-    fn setup(&mut self, config: Self::SetupConfig) -> AxResult {
+    pub fn setup(&mut self, config: X86VcpuSetupConfig) -> X86VcpuResult {
         self.setup_vmcs(
-            self.entry.unwrap(),
-            self.nested_page_table_root.unwrap(),
+            self.entry.ok_or(X86VcpuError::InvalidInput)?,
+            self.nested_page_table_root
+                .ok_or(X86VcpuError::InvalidInput)?,
             config,
         )
     }
 
-    fn run(&mut self) -> AxResult<Self::Exit> {
+    fn handle_port_io_exit(
+        &mut self,
+        io_info: vmcs::VmxIoExitInfo,
+        instruction_len: u8,
+    ) -> X86VcpuResult<X86VmExit> {
+        let width = X86AccessWidth::try_from(io_info.access_size as usize)
+            .map_err(|_| x86_err_type!(InvalidData, "invalid VMX I/O access width"))?;
+        let port = X86Port::new(io_info.port);
+
+        if !io_info.is_string {
+            self.advance_rip(instruction_len)?;
+            return Ok(if io_info.is_in {
+                X86VmExit::PortIoRead { port, width }
+            } else {
+                X86VmExit::PortIoWrite {
+                    port,
+                    width,
+                    data: self.regs().rax.get_bits(width.bits_range()),
+                }
+            });
+        }
+
+        let address_size = self.string_io_address_size()?;
+        if io_info.is_repeat && address_size.low(self.regs().rcx) == 0 {
+            self.advance_rip(instruction_len)?;
+            return Ok(X86VmExit::Nothing);
+        }
+
+        let direction = if io_info.is_in {
+            X86PortIoDirection::In
+        } else {
+            X86PortIoDirection::Out
+        };
+        let index = match direction {
+            X86PortIoDirection::In => self.regs().rdi,
+            X86PortIoDirection::Out => self.regs().rsi,
+        };
+        let guest_linear = VmcsReadOnlyNW::GUEST_LINEAR_ADDR.read()?;
+        let guest_paddr =
+            self.translate_guest_linear(X86GuestVirtAddr::from_usize(guest_linear))?;
+        let next_rip = VmcsGuestNW::RIP
+            .read()?
+            .checked_add(usize::from(instruction_len))
+            .ok_or(X86VcpuError::InvalidData)? as u64;
+        let decrement = VmcsGuestNW::RFLAGS.read()? as u64 & RFlags::DIRECTION_FLAG.bits() != 0;
+
+        Ok(X86VmExit::PortIoString(X86PortIoStringExit::new(
+            X86PortIoAccess {
+                port,
+                width,
+                direction,
+                guest_paddr,
+            },
+            X86PortIoIteration {
+                address_size,
+                index,
+                count: self.regs().rcx,
+                repeat: io_info.is_repeat,
+                decrement,
+                next_rip,
+            },
+        )))
+    }
+
+    fn string_io_address_size(&self) -> X86VcpuResult<X86AddressSize> {
+        let default_bytes = match self.get_cpu_mode() {
+            VmCpuMode::Mode64 => 8,
+            VmCpuMode::Real => 2,
+            VmCpuMode::Protected | VmCpuMode::Compatibility => {
+                if VmcsGuest32::CS_ACCESS_RIGHTS.read()? & (1 << 14) != 0 {
+                    4
+                } else {
+                    2
+                }
+            }
+        };
+        let mut cursor = self.gla2gva(X86GuestVirtAddr::from_usize(VmcsGuestNW::RIP.read()?));
+        let mut address_override = false;
+
+        for _ in 0..15 {
+            match self.read_guest_u8(cursor)? {
+                0x67 => {
+                    address_override = true;
+                    cursor += 1;
+                }
+                0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0xf0 | 0xf2 | 0xf3 => {
+                    cursor += 1;
+                }
+                0x40..=0x4f if self.get_cpu_mode() == VmCpuMode::Mode64 => cursor += 1,
+                0x6c..=0x6f => {
+                    let bytes = if address_override {
+                        match default_bytes {
+                            8 => 4,
+                            4 => 2,
+                            2 => 4,
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        default_bytes
+                    };
+                    return X86AddressSize::from_bytes(bytes);
+                }
+                _ => return x86_err!(InvalidData, "VMX string-I/O exit has an invalid opcode"),
+            }
+        }
+
+        x86_err!(InvalidData, "VMX string-I/O instruction exceeds 15 bytes")
+    }
+
+    /// Commits one successfully emulated string-I/O element.
+    pub fn complete_port_io_string(&mut self, exit: X86PortIoStringExit) -> X86VcpuResult {
+        if exit.instruction_complete() {
+            let next_rip =
+                usize::try_from(exit.next_rip()).map_err(|_| X86VcpuError::InvalidData)?;
+            VmcsGuestNW::RIP.write(next_rip)?;
+        }
+        let regs = self.regs_mut();
+        match exit.direction() {
+            X86PortIoDirection::In => regs.rdi = exit.updated_index(),
+            X86PortIoDirection::Out => regs.rsi = exit.updated_index(),
+        }
+        if let Some(count) = exit.updated_count() {
+            regs.rcx = count;
+        }
+        Ok(())
+    }
+
+    /// Runs this VMX vCPU until an exit is reported to the VMM.
+    ///
+    /// The caller must keep the vCPU bound to the current host CPU, prevent
+    /// migration, and keep host IRQs disabled until this method returns.
+    pub fn run(&mut self) -> X86VcpuResult<X86VmExit> {
         match self.inner_run()? {
             Some(exit_info) => Ok(if exit_info.entry_failure {
-                VmExit::FailEntry {
+                X86VmExit::FailEntry {
                     // Todo: get `hardware_entry_failure_reason` somehow.
                     hardware_entry_failure_reason: 0,
                 }
@@ -1665,7 +2008,7 @@ impl VmArchVcpuOps for VmxVcpu {
                 match exit_info.exit_reason {
                     VmxExitReason::VMCALL => {
                         self.advance_rip(exit_info.exit_instruction_length as _)?;
-                        VmExit::Hypercall {
+                        X86VmExit::Hypercall {
                             nr: self.regs().rax,
                             args: [
                                 self.regs().rdi,
@@ -1677,77 +2020,42 @@ impl VmArchVcpuOps for VmxVcpu {
                             ],
                         }
                     }
-                    VmxExitReason::IO_INSTRUCTION => {
-                        let io_info = self.io_exit_info().unwrap();
-                        self.advance_rip(exit_info.exit_instruction_length as _)?;
-
-                        let port = io_info.port;
-
-                        if io_info.is_repeat || io_info.is_string {
-                            warn!("VMX unsupported IO-Exit: {io_info:#x?} of {exit_info:#x?}");
-                            warn!("VCpu {self:#x?}");
-                            VmExit::Halt
-                        } else {
-                            let width = match AccessWidth::try_from(io_info.access_size as usize) {
-                                Ok(width) => width,
-                                Err(_) => {
-                                    warn!("VMX invalid IO-Exit: {io_info:#x?} of {exit_info:#x?}");
-                                    warn!("VCpu {self:#x?}");
-                                    return Ok(VmExit::Halt);
-                                }
-                            };
-
-                            if io_info.is_in {
-                                VmExit::IoRead {
-                                    port: Port(port),
-                                    width,
-                                }
-                            } else if port == QEMU_EXIT_PORT
-                                && width == AccessWidth::Word
-                                && self.regs().rax == QEMU_EXIT_MAGIC
-                            {
-                                VmExit::SystemDown
-                            } else {
-                                VmExit::IoWrite {
-                                    port: Port(port),
-                                    width,
-                                    data: self.regs().rax.get_bits(width.bits_range()),
-                                }
-                            }
-                        }
-                    }
+                    VmxExitReason::IO_INSTRUCTION => self.handle_port_io_exit(
+                        self.io_exit_info()?,
+                        exit_info.exit_instruction_length as u8,
+                    )?,
                     VmxExitReason::EXTERNAL_INTERRUPT => {
                         let int_info = self.interrupt_exit_info()?;
                         assert!(int_info.valid);
-                        VmExit::ExternalInterrupt {
+                        X86VmExit::ExternalInterrupt {
                             vector: int_info.vector as _,
                         }
                     }
                     VmxExitReason::PREEMPTION_TIMER => {
                         self.handle_vmx_preemption_timer()?;
-                        VmExit::PreemptionTimer
+                        X86VmExit::PreemptionTimer
                     }
                     VmxExitReason::HLT => {
                         self.advance_rip(exit_info.exit_instruction_length as _)?;
-                        VmExit::PreemptionTimer
+                        X86VmExit::Halt
                     }
-                    VmxExitReason::VIRTUALIZED_EOI => VmExit::InterruptEnd {
+                    VmxExitReason::VIRTUALIZED_EOI => X86VmExit::InterruptEnd {
                         vector: self.vlapic.handle_eoi(),
                     },
                     VmxExitReason::APIC_WRITE => {
                         let offset = self.apic_access_exit_info()?.offset as usize;
                         if offset == X86_LOCAL_APIC_EOI_OFFSET {
                             let vector = self.vlapic.handle_eoi();
-                            VmExit::InterruptEnd { vector }
+                            X86VmExit::InterruptEnd { vector }
                         } else {
-                            VmExit::Nothing
+                            X86VmExit::Nothing
                         }
                     }
                     VmxExitReason::APIC_ACCESS => self.handle_apic_access(&exit_info)?,
                     VmxExitReason::EPT_VIOLATION => {
                         let info = self.nested_page_fault_info()?;
-                        let write = info.access_flags.contains(MappingFlags::WRITE);
-                        let read = info.access_flags.contains(MappingFlags::READ);
+                        let write = info.access_flags.contains(X86AccessFlags::WRITE);
+                        let read = info.access_flags.contains(X86AccessFlags::READ);
                         if (read || write)
                             && let Some((mmio_exit, instruction_len)) = self.decode_ept_mmio_access(
                                 &exit_info,
@@ -1758,7 +2066,7 @@ impl VmArchVcpuOps for VmxVcpu {
                             self.advance_rip(instruction_len)?;
                             mmio_exit
                         } else {
-                            VmExit::NestedPageFault {
+                            X86VmExit::NestedPageFault {
                                 addr: info.fault_guest_paddr,
                                 access_flags: info.access_flags,
                             }
@@ -1770,9 +2078,8 @@ impl VmArchVcpuOps for VmxVcpu {
                             self.handle_apic_msr_access(false, msr)?
                         } else {
                             // `reg` is unused here.
-                            VmExit::SysRegRead {
-                                addr: SysRegAddr::new(msr as _),
-                                reg: 0,
+                            X86VmExit::MsrRead {
+                                addr: X86MsrAddr::new(msr as _),
                             }
                         }
                     }
@@ -1783,8 +2090,8 @@ impl VmArchVcpuOps for VmxVcpu {
                         } else {
                             let value = (self.regs().rax & 0xffff_ffff)
                                 | ((self.regs().rdx & 0xffff_ffff) << 32);
-                            VmExit::SysRegWrite {
-                                addr: SysRegAddr::new(msr as _),
+                            X86VmExit::MsrWrite {
+                                addr: X86MsrAddr::new(msr as _),
                                 value,
                             }
                         }
@@ -1792,28 +2099,53 @@ impl VmArchVcpuOps for VmxVcpu {
                     _ => {
                         warn!("VMX unsupported VM-Exit: {exit_info:#x?}");
                         warn!("VCpu {self:#x?}");
-                        VmExit::Halt
+                        X86VmExit::Halt
                     }
                 }
             }),
-            None => Ok(VmExit::Nothing),
+            None => Ok(X86VmExit::Nothing),
         }
     }
 
-    fn bind(&mut self) -> AxResult {
+    pub fn bind(&mut self) -> X86VcpuResult {
         self.bind_to_current_processor()
     }
 
-    fn unbind(&mut self) -> AxResult {
+    pub fn unbind(&mut self) -> X86VcpuResult {
         self.launched = false;
         self.unbind_from_current_processor()
     }
 
-    fn set_gpr(&mut self, reg: usize, val: usize) {
+    pub fn set_gpr(&mut self, reg: usize, val: usize) {
         self.regs_mut().set_reg_of_index(reg as u8, val as u64);
     }
 
-    fn inject_interrupt(&mut self, vector: usize) -> AxResult {
+    /// Sets one byte-encoded guest register while preserving adjacent bytes.
+    pub fn set_gpr_byte(&mut self, reg: X86ByteRegister, value: u8) {
+        if let Err(err) = self.write_byte_register(reg, value) {
+            warn!("failed to write VMX byte register: {err:?}");
+        }
+    }
+
+    /// Sets one 16-bit guest register while preserving adjacent bytes.
+    pub fn set_gpr_word(&mut self, reg: usize, value: u16) {
+        if let Err(err) = self.write_word_register(reg, value) {
+            warn!("failed to write VMX word register: {err:?}");
+        }
+    }
+
+    /// Sets the architectural RSP according to the destination-operand width.
+    pub fn set_gpr_rsp(&mut self, width: X86AccessWidth, value: u64) {
+        let Some(old) = self.read_rsp() else {
+            warn!("failed to read VMX RSP for MMIO read");
+            return;
+        };
+        if let Err(err) = self.write_rsp(crate::decode::x86_rsp_merge(old, width, value)) {
+            warn!("failed to write VMX RSP: {err:?}");
+        }
+    }
+
+    pub fn inject_interrupt(&mut self, vector: usize) -> X86VcpuResult {
         if vector != 0 {
             // warn!("interrupt queued in inject_interrupt: vector {:#x}", vector);
         } else {
@@ -1824,297 +2156,94 @@ impl VmArchVcpuOps for VmxVcpu {
         Ok(())
     }
 
-    fn inject_interrupt_with_trigger(
+    pub fn inject_interrupt_with_trigger(
         &mut self,
         vector: usize,
-        trigger: axvm_types::InterruptTriggerMode,
-    ) -> AxResult {
+        level_triggered: bool,
+    ) -> X86VcpuResult {
         if vector == 0 {
             warn!("interrupt queued in inject_interrupt_with_trigger: vector 0");
             panic!()
         }
-        self.queue_event_with_trigger(
-            vector as u8,
-            None,
-            trigger == axvm_types::InterruptTriggerMode::LevelTriggered,
-        );
+        self.queue_event_with_trigger(vector as u8, None, level_triggered);
         Ok(())
     }
 
-    fn handle_eoi(&mut self) -> Option<u8> {
+    pub fn handle_eoi(&mut self) -> Option<u8> {
         self.vlapic.handle_eoi()
     }
 
-    fn set_return_value(&mut self, val: usize) {
+    pub fn set_return_value(&mut self, val: usize) {
         self.regs_mut().rax = val as u64;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloc::format;
-
     use super::*;
 
-    #[test]
-    fn test_vm_cpu_mode_enum() {
-        // Test VmCpuMode enum values
-        assert_ne!(VmCpuMode::Real, VmCpuMode::Protected);
-        assert_ne!(VmCpuMode::Protected, VmCpuMode::Compatibility);
-        assert_ne!(VmCpuMode::Compatibility, VmCpuMode::Mode64);
-
-        // Test Debug formatting
-        let debug_str = format!("{:?}", VmCpuMode::Mode64);
-        assert!(debug_str.contains("Mode64"));
+    #[derive(Debug)]
+    struct FakeSyscallMsrBank {
+        current: VmxSyscallMsrState,
     }
 
-    #[test]
-    fn test_general_registers_operations() {
-        let mut regs = GeneralRegisters::default();
-
-        // Test initial state
-        assert_eq!(regs.rax, 0);
-        assert_eq!(regs.rbx, 0);
-
-        // Test setting and getting values
-        regs.rax = 0x1234567890abcdef;
-        regs.rbx = 0xfedcba0987654321;
-
-        assert_eq!(regs.rax, 0x1234567890abcdef);
-        assert_eq!(regs.rbx, 0xfedcba0987654321);
-
-        // Test register access by index
-        regs.set_reg_of_index(0, 0x1111111111111111); // RAX
-        assert_eq!(regs.get_reg_of_index(0), 0x1111111111111111);
-
-        regs.set_reg_of_index(1, 0x2222222222222222); // RCX  
-        assert_eq!(regs.get_reg_of_index(1), 0x2222222222222222);
-    }
-
-    #[test]
-    fn test_constants() {
-        // Test that constants have expected values
-        assert_eq!(VMX_PREEMPTION_TIMER_SET_VALUE, 100_000);
-        assert_eq!(QEMU_EXIT_PORT, 0x604);
-        assert_eq!(QEMU_EXIT_MAGIC, 0x2000);
-        assert_eq!(MSR_IA32_EFER_LMA_BIT, 1 << 10);
-        assert_eq!(CR0_PE, 1 << 0);
-    }
-
-    #[test]
-    fn test_bit_operations() {
-        use bit_field::BitField;
-
-        let mut value = 0u64;
-        value.set_bits(0..32, 0x12345678);
-        value.set_bits(32..64, 0xabcdef00);
-
-        assert_eq!(value.get_bits(0..32), 0x12345678);
-        assert_eq!(value.get_bits(32..64), 0xabcdef00);
-    }
-
-    // Mock tests for VmxVcpu (limited to safe operations)
-    mod vmx_vcpu_tests {
-        use super::*;
-
-        // Helper function to create a test VmxVcpu (this would normally require VMX hardware)
-        fn create_test_vcpu_regs() -> GeneralRegisters {
-            let mut regs = GeneralRegisters::default();
-            regs.rax = 0x1000;
-            regs.rbx = 0x2000;
-            regs.rcx = 0x3000;
-            regs.rdx = 0x4000;
-            regs
+    impl VmxSyscallMsrBank for FakeSyscallMsrBank {
+        fn read(&self) -> VmxSyscallMsrState {
+            self.current
         }
 
-        #[test]
-        fn test_general_registers_clone() {
-            let regs = create_test_vcpu_regs();
-            let cloned_regs = regs.clone();
-
-            assert_eq!(regs.rax, cloned_regs.rax);
-            assert_eq!(regs.rbx, cloned_regs.rbx);
-            assert_eq!(regs.rcx, cloned_regs.rcx);
-            assert_eq!(regs.rdx, cloned_regs.rdx);
-        }
-
-        #[test]
-        fn test_edx_eax_operations() {
-            // Test the logic for combining EDX:EAX
-            let rax = 0x12345678u64;
-            let rdx = 0xabcdef00u64;
-
-            // Simulate read_edx_eax logic
-            let combined = ((rdx & 0xffff_ffff) << 32) | (rax & 0xffff_ffff);
-            assert_eq!(combined, 0xabcdef0012345678);
-
-            // Simulate write_edx_eax logic
-            let val = 0xfedcba0987654321u64;
-            let new_rax = val & 0xffff_ffff;
-            let new_rdx = val >> 32;
-
-            assert_eq!(new_rax, 0x87654321);
-            assert_eq!(new_rdx, 0xfedcba09);
-        }
-
-        #[test]
-        fn test_register_bit_operations() {
-            let mut regs = GeneralRegisters::default();
-
-            // Test setting specific bits in registers
-            regs.rcx = 0;
-            regs.rcx.set_bits(0..32, 0x12345678);
-            assert_eq!(regs.rcx.get_bits(0..32), 0x12345678);
-
-            regs.rdx = 0xffffffffffffffff;
-            regs.rdx.set_bits(32..64, 0);
-            assert_eq!(regs.rdx.get_bits(32..64), 0);
-            assert_eq!(regs.rdx.get_bits(0..32), 0xffffffff);
-        }
-
-        #[test]
-        fn test_gla2gva_logic() {
-            // Test the address translation logic (without actual VMX hardware)
-            let guest_rip = 0x1000usize;
-            let seg_base_64bit = 0; // In 64-bit mode, segment base is 0
-            let seg_base_other = 0x10000; // In other modes, segment base matters
-
-            // 64-bit mode calculation
-            let gva_64bit = guest_rip + seg_base_64bit;
-            assert_eq!(gva_64bit, 0x1000);
-
-            // Other mode calculation
-            let gva_other = guest_rip + seg_base_other;
-            assert_eq!(gva_other, 0x11000);
-        }
-
-        #[test]
-        fn test_interrupt_vector_validation() {
-            // Test interrupt vector validation logic
-            let valid_exception = 6; // #UD exception
-            let valid_interrupt = 0x20;
-            let invalid_vector = 0;
-
-            assert!(valid_exception < 32); // Exceptions are < 32
-            assert!(valid_interrupt >= 32); // Interrupts are >= 32
-            assert_eq!(invalid_vector, 0); // Vector 0 should be handled specially
-        }
-
-        #[test]
-        fn test_page_walk_info_struct() {
-            let ptw_info = GuestPageWalkInfo {
-                top_entry: 0x1000,
-                level: 4,
-                width: 9,
-                is_user_mode_access: false,
-                is_write_access: false,
-                is_inst_fetch: false,
-                pse: true,
-                wp: true,
-                nxe: true,
-                is_smap_on: false,
-                is_smep_on: false,
-            };
-
-            assert_eq!(ptw_info.level, 4);
-            assert_eq!(ptw_info.width, 9);
-            assert_eq!(ptw_info.top_entry, 0x1000);
-        }
-
-        #[test]
-        fn test_cpuid_constants() {
-            // Test CPUID-related constants used in handle_cpuid
-            const LEAF_FEATURE_INFO: u32 = 0x1;
-            const LEAF_HYPERVISOR_INFO: u32 = 0x4000_0000;
-            const FEATURE_VMX: u32 = 1 << 5;
-            const FEATURE_HYPERVISOR: u32 = 1 << 31;
-
-            assert_eq!(LEAF_FEATURE_INFO, 1);
-            assert_eq!(LEAF_HYPERVISOR_INFO, 0x40000000);
-            assert_eq!(FEATURE_VMX, 32);
-            assert_eq!(FEATURE_HYPERVISOR, 0x80000000);
-        }
-
-        #[test]
-        fn test_cr_flags_operations() {
-            use x86_64::registers::control::{Cr0Flags, Cr4Flags};
-
-            // Test CR0 flags
-            let cr0_flags = Cr0Flags::PAGING | Cr0Flags::PROTECTED_MODE_ENABLE;
-            assert!(cr0_flags.contains(Cr0Flags::PAGING));
-            assert!(cr0_flags.contains(Cr0Flags::PROTECTED_MODE_ENABLE));
-            assert!(!cr0_flags.contains(Cr0Flags::CACHE_DISABLE));
-
-            // Test CR4 flags
-            let cr4_flags = Cr4Flags::VIRTUAL_MACHINE_EXTENSIONS | Cr4Flags::PAGE_SIZE_EXTENSION;
-            assert!(cr4_flags.contains(Cr4Flags::VIRTUAL_MACHINE_EXTENSIONS));
-            assert!(cr4_flags.contains(Cr4Flags::PAGE_SIZE_EXTENSION));
-        }
-
-        #[test]
-        fn test_access_width_operations() {
-            // Test access width enumeration
-            use axvm_types::AccessWidth;
-
-            assert_eq!(AccessWidth::Byte as usize, 0);
-            assert_eq!(AccessWidth::Word as usize, 1);
-            assert_eq!(AccessWidth::Dword as usize, 2);
-            assert_eq!(AccessWidth::Qword as usize, 3);
-
-            // Test conversion
-            assert_eq!(AccessWidth::try_from(1), Ok(AccessWidth::Byte));
-            assert_eq!(AccessWidth::try_from(2), Ok(AccessWidth::Word));
-            assert_eq!(AccessWidth::try_from(4), Ok(AccessWidth::Dword));
-            assert_eq!(AccessWidth::try_from(8), Ok(AccessWidth::Qword));
-        }
-    }
-
-    // Tests for utility functions that don't require hardware
-    #[test]
-    fn test_get_tr_base_logic() {
-        let mut test_entry = 0u64;
-        test_entry |= 1u64 << 47; // Present bit
-        test_entry |= (0x1000u64 & 0xFFFFFF) << 16; // Base address bits 16-39
-
-        // Present bit check
-        let present = test_entry & (1 << 47) != 0;
-        assert!(present);
-
-        // Base address extraction
-        let base_low = (test_entry >> 16) & 0xFFFFFF;
-        let base_high = (test_entry >> 56) & 0xFF;
-        let base_addr = base_low | (base_high << 24);
-
-        assert_eq!(base_addr, 0x1000);
-    }
-
-    #[test]
-    fn test_vmx_exit_reason_enum() {
-        // Test that VmxExitReason enum can be used in match statements
-        let test_reason = VmxExitReason::VMCALL;
-        match test_reason {
-            VmxExitReason::VMCALL => assert!(true),
-            _ => assert!(false),
+        unsafe fn write(&mut self, state: VmxSyscallMsrState) {
+            self.current = state;
         }
     }
 
     #[test]
-    fn test_debug_implementations() {
-        // Test Debug implementations for various types
-        let cpu_mode = VmCpuMode::Mode64;
-        let debug_str = format!("{:?}", cpu_mode);
-        assert!(!debug_str.is_empty());
+    fn syscall_msrs_follow_the_vcpu_across_host_cpu_migration() {
+        let host_cpu_1 = VmxSyscallMsrState {
+            star: 0x11,
+            lstar: 0x12,
+            cstar: 0x13,
+            fmask: 0x14,
+            kernel_gs_base: 0x15,
+        };
+        let host_cpu_2 = VmxSyscallMsrState {
+            star: 0x21,
+            lstar: 0x22,
+            cstar: 0x23,
+            fmask: 0x24,
+            kernel_gs_base: 0x25,
+        };
+        let mut guest = VmxSyscallMsrState {
+            star: 0x31,
+            lstar: 0x32,
+            cstar: 0x33,
+            fmask: 0x34,
+            kernel_gs_base: 0x35,
+        };
+        let guest_after_cpu_1 = VmxSyscallMsrState {
+            star: 0x41,
+            lstar: 0x42,
+            cstar: 0x43,
+            fmask: 0x44,
+            kernel_gs_base: 0x45,
+        };
 
-        let regs = GeneralRegisters::default();
-        let debug_str = format!("{:?}", regs);
-        assert!(!debug_str.is_empty());
+        let mut cpu_1 = FakeSyscallMsrBank {
+            current: host_cpu_1,
+        };
+        let saved_host_cpu_1 = unsafe { enter_guest_syscall_msrs(guest, &mut cpu_1) };
+        assert_eq!(cpu_1.current, guest);
+        cpu_1.current = guest_after_cpu_1;
+        unsafe { leave_guest_syscall_msrs(&mut guest, saved_host_cpu_1, &mut cpu_1) };
+        assert_eq!(guest, guest_after_cpu_1);
+        assert_eq!(cpu_1.current, host_cpu_1);
+
+        let mut cpu_2 = FakeSyscallMsrBank {
+            current: host_cpu_2,
+        };
+        let saved_host_cpu_2 = unsafe { enter_guest_syscall_msrs(guest, &mut cpu_2) };
+        assert_eq!(cpu_2.current, guest_after_cpu_1);
+        unsafe { leave_guest_syscall_msrs(&mut guest, saved_host_cpu_2, &mut cpu_2) };
+        assert_eq!(cpu_2.current, host_cpu_2);
     }
-
-    // Note: Most VmxVcpu methods require actual VMX hardware support and cannot be unit tested
-    // without either:
-    // 1. Running on VMX-capable hardware with appropriate privileges
-    // 2. Extensive mocking of the entire VMX infrastructure
-    //
-    // For comprehensive testing of VmxVcpu, integration tests on actual hardware
-    // or hardware simulators would be more appropriate.
 }

@@ -1,12 +1,15 @@
-use ax_plat::mem::{IomapAttrs, IomapDecision, IomapError, MemIf, PhysAddr, RawRange, VirtAddr};
+use ax_lazyinit::OnceLock;
+use ax_plat::mem::{
+    CpuSharedMemoryModel, DCacheOp, IomapAttrs, IomapDecision, IomapError, MemIf, PhysAddr,
+    RawRange, VirtAddr,
+};
 use heapless::Vec;
 use someboot::ArchTrait;
 use somehal::mem::MemoryType;
-use spin::Once;
 
-static FREE_LIST: Once<Vec<RawRange, 32>> = Once::new();
-static RESERVED_LIST: Once<Vec<RawRange, 32>> = Once::new();
-static MMIO_LIST: Once<Vec<RawRange, 16>> = Once::new();
+static FREE_LIST: OnceLock<Vec<RawRange, 32>> = OnceLock::new();
+static RESERVED_LIST: OnceLock<Vec<RawRange, 32>> = OnceLock::new();
+static MMIO_LIST: OnceLock<Vec<RawRange, 16>> = OnceLock::new();
 
 #[cfg(target_arch = "x86_64")]
 const X86_FIXED_MMIO_RANGES: &[RawRange] = &[
@@ -67,6 +70,31 @@ fn push_non_overlapping<const N: usize>(list: &mut Vec<RawRange, N>, range: RawR
 
 #[impl_plat_interface]
 impl MemIf for MemIfImpl {
+    fn cpu_shared_memory_model() -> CpuSharedMemoryModel {
+        // All architectures supported by the dynamic platform require their
+        // firmware/interconnect to establish coherent cacheable RAM before
+        // secondary CPUs enter the generic runtime.
+        #[cfg(any(
+            target_arch = "aarch64",
+            target_arch = "loongarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        ))]
+        {
+            CpuSharedMemoryModel::Coherent
+        }
+
+        #[cfg(not(any(
+            target_arch = "aarch64",
+            target_arch = "loongarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )))]
+        {
+            CpuSharedMemoryModel::Unsupported
+        }
+    }
+
     fn phys_ram_ranges() -> &'static [RawRange] {
         FREE_LIST.call_once(|| {
             let mut list = Vec::new();
@@ -154,9 +182,28 @@ impl MemIf for MemIfImpl {
     fn user_aspace_needs_kernel_mappings() -> bool {
         <someboot::arch::Arch as ArchTrait>::user_aspace_needs_kernel_mappings()
     }
+
+    fn dcache_range(op: DCacheOp, addr: VirtAddr, size: usize) {
+        somehal::cache::dcache_range(to_somehal_dcache_op(op), addr.as_usize() as *const u8, size);
+    }
+
+    fn dma_coherent_before_map_uncached(addr: VirtAddr, size: usize) {
+        somehal::cache::dma_coherent_before_map_uncached(addr.as_usize() as *const u8, size);
+    }
+
+    fn dma_coherent_before_unmap_uncached(addr: VirtAddr, size: usize) {
+        somehal::cache::dma_coherent_before_unmap_uncached(addr.as_usize() as *const u8, size);
+    }
+
+    fn dma_coherent_after_mapping_update() {
+        somehal::cache::dma_coherent_after_mapping_update();
+    }
 }
 
-#[unsafe(no_mangle)]
-fn _percpu_base_ptr(idx: usize) -> *mut u8 {
-    somehal::smp::percpu_data_ptr(idx).unwrap_or_default()
+fn to_somehal_dcache_op(op: DCacheOp) -> somehal::cache::DCacheOp {
+    match op {
+        DCacheOp::Clean => somehal::cache::DCacheOp::Clean,
+        DCacheOp::Invalidate => somehal::cache::DCacheOp::Invalidate,
+        DCacheOp::CleanInvalidate => somehal::cache::DCacheOp::CleanInvalidate,
+    }
 }

@@ -12,14 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod command;
-
 use std::io::prelude::*;
-use std::println;
 use std::string::ToString;
 
+fn submit_shell_format(args: core::fmt::Arguments<'_>, newline: bool) {
+    let mut output = std::fmt::format(args);
+    if newline {
+        output.push('\n');
+    }
+    crate::guest_console::submit_host_bytes(output.as_bytes());
+}
+
+macro_rules! print {
+    ($($arg:tt)*) => {
+        crate::shell::submit_shell_format(format_args!($($arg)*), false)
+    };
+}
+
+macro_rules! println {
+    () => {
+        crate::shell::submit_shell_format(format_args!(""), true)
+    };
+    ($($arg:tt)*) => {
+        crate::shell::submit_shell_format(format_args!($($arg)*), true)
+    };
+}
+
+mod command;
+
+use crate::guest_console::ConsoleInputEvent;
 use crate::shell::command::{
-    CommandHistory, clear_line_and_redraw, handle_builtin_commands, print_prompt, prompt_string,
+    CommandHistory, handle_builtin_commands, print_prompt, prompt_string, redraw_line,
     run_cmd_bytes,
 };
 
@@ -37,10 +60,63 @@ enum InputState {
     EscapeSeq,
 }
 
+fn print_shell_intro() {
+    println!("Welcome to AxVisor Shell!");
+    println!("Type 'help' to see available commands");
+    println!("Use UP/DOWN arrows to navigate command history");
+    print_console_shortcuts();
+    #[cfg(not(feature = "fs"))]
+    println!("Note: Running with limited features (filesystem support disabled).");
+    println!();
+}
+
+fn print_console_shortcuts() {
+    println!("Console shortcuts:");
+    println!("  Ctrl+X, then h  return to the Axvisor shell");
+    println!("  Ctrl+X, then [  attach the previous running guest");
+    println!("  Ctrl+X, then ]  attach the next running guest");
+}
+
+fn route_pending_host_log(
+    record: &[u8],
+    edit_line: &[u8],
+    cursor: usize,
+    line_len: usize,
+    dropped_records: usize,
+    dropped_bytes: usize,
+) -> bool {
+    let Some(output) = crate::guest_console::route_host_log(record, dropped_records, dropped_bytes)
+    else {
+        return true;
+    };
+
+    if crate::guest_console::attached_vm().is_some() {
+        crate::guest_console::submit_host_bytes(&output);
+        return true;
+    }
+
+    let content = std::str::from_utf8(&edit_line[..line_len]).unwrap_or("");
+    let prompt = prompt_string();
+    let mut transaction = std::vec::Vec::with_capacity(
+        output
+            .len()
+            .saturating_add(prompt.len())
+            .saturating_add(content.len())
+            .saturating_add(32),
+    );
+    transaction.extend_from_slice(b"\r\x1b[2K");
+    transaction.extend_from_slice(&output);
+    transaction.extend_from_slice(prompt.as_bytes());
+    transaction.extend_from_slice(content.as_bytes());
+    if cursor < content.len() {
+        write!(transaction, "\x1b[{}D", content.len() - cursor).ok();
+    }
+    crate::guest_console::submit_host_bytes(&transaction);
+    true
+}
+
 // Initialize the console shell.
 pub fn console_init() {
-    let mut stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
     let mut history = CommandHistory::new(100);
 
     let mut buf = [0; MAX_LINE_LEN];
@@ -48,23 +124,94 @@ pub fn console_init() {
     let mut line_len = 0; // actual length of current line
 
     let mut input_state = InputState::Normal;
+    let mut pending_shell_byte = None;
+    let mut shell_announced = false;
 
-    println!("Welcome to AxVisor Shell!");
-    println!("Type 'help' to see available commands");
-    println!("Use UP/DOWN arrows to navigate command history");
-    #[cfg(not(feature = "fs"))]
-    println!("Note: Running with limited features (filesystem support disabled).");
-    println!();
-
-    print_prompt();
+    if crate::guest_console::attached_vm().is_none() {
+        print_shell_intro();
+        shell_announced = true;
+        print_prompt();
+    }
 
     loop {
-        let mut temp_buf = [0u8; 1];
+        if let Some(vm_id) = crate::guest_console::reconcile_vm_states() {
+            println!();
+            println!("[Axvisor] VM[{vm_id}] stopped; returning to the management shell");
+            if !shell_announced {
+                print_shell_intro();
+                shell_announced = true;
+            }
+            let current_content = std::str::from_utf8(&buf[..line_len]).unwrap_or("");
+            redraw_shell_line(&prompt_string(), current_content, cursor);
+        }
 
-        let ch = match stdin.read(&mut temp_buf) {
-            Ok(1) => temp_buf[0],
-            _ => {
-                continue;
+        let dropped = crate::guest_console::take_host_log_drops();
+        if let Some(record) = crate::guest_console::read_host_log() {
+            route_pending_host_log(
+                record.bytes(),
+                &buf,
+                cursor,
+                line_len,
+                dropped.records,
+                dropped.source_bytes,
+            );
+            continue;
+        }
+        if dropped.records != 0 {
+            route_pending_host_log(
+                &[],
+                &buf,
+                cursor,
+                line_len,
+                dropped.records,
+                dropped.source_bytes,
+            );
+            continue;
+        }
+
+        let ch = match pending_shell_byte.take() {
+            Some(ch) => ch,
+            None => {
+                let Some(host_byte) = crate::guest_console::read_host_byte() else {
+                    crate::guest_console::wait_for_host_event();
+                    continue;
+                };
+
+                match crate::guest_console::route_host_byte(host_byte) {
+                    ConsoleInputEvent::ShellByte(ch) => ch,
+                    ConsoleInputEvent::ShellSequence(first, second) => {
+                        pending_shell_byte = Some(second);
+                        first
+                    }
+                    ConsoleInputEvent::Consumed => continue,
+                    ConsoleInputEvent::Attached(vm_id) => {
+                        println!();
+                        println!(
+                            "[Axvisor] attached VM[{vm_id}] console; use Ctrl+X, then h to return \
+                             to the shell"
+                        );
+                        crate::guest_console::activate(vm_id);
+                        continue;
+                    }
+                    ConsoleInputEvent::Detached(vm_id) => {
+                        println!();
+                        println!("[Axvisor] detached VM[{vm_id}] console");
+                        if !shell_announced {
+                            print_shell_intro();
+                            shell_announced = true;
+                        }
+                        let current_content = std::str::from_utf8(&buf[..line_len]).unwrap_or("");
+                        redraw_shell_line(&prompt_string(), current_content, cursor);
+                        continue;
+                    }
+                    ConsoleInputEvent::NoRunningGuest => {
+                        println!();
+                        println!("[Axvisor] no running VM is available for console attachment");
+                        let current_content = std::str::from_utf8(&buf[..line_len]).unwrap_or("");
+                        redraw_shell_line(&prompt_string(), current_content, cursor);
+                        continue;
+                    }
+                }
             }
         };
 
@@ -89,7 +236,9 @@ pub fn console_init() {
                             cursor = 0;
                             line_len = 0;
                         }
-                        print_prompt();
+                        if crate::guest_console::attached_vm().is_none() {
+                            print_prompt();
+                        }
                     }
                     BS | DL => {
                         // backspace: delete character before cursor / DEL key: delete character at cursor
@@ -107,7 +256,7 @@ pub fn console_init() {
                             let current_content =
                                 std::str::from_utf8(&buf[..line_len]).unwrap_or("");
                             let prompt = prompt_string();
-                            clear_line_and_redraw(&mut stdout, &prompt, current_content, cursor);
+                            redraw_shell_line(&prompt, current_content, cursor);
                         }
                     }
                     ESC => {
@@ -130,7 +279,7 @@ pub fn console_init() {
                             let current_content =
                                 std::str::from_utf8(&buf[..line_len]).unwrap_or("");
                             let prompt = prompt_string();
-                            clear_line_and_redraw(&mut stdout, &prompt, current_content, cursor);
+                            redraw_shell_line(&prompt, current_content, cursor);
                         }
                     }
                 }
@@ -157,7 +306,7 @@ pub fn console_init() {
                             cursor = copy_len;
                             line_len = copy_len;
                             let prompt = prompt_string();
-                            clear_line_and_redraw(&mut stdout, &prompt, prev_cmd, cursor);
+                            redraw_shell_line(&prompt, prev_cmd, cursor);
                         }
                         input_state = InputState::Normal;
                     }
@@ -175,7 +324,7 @@ pub fn console_init() {
                                 line_len = copy_len;
 
                                 let prompt = prompt_string();
-                                clear_line_and_redraw(&mut stdout, &prompt, next_cmd, cursor);
+                                redraw_shell_line(&prompt, next_cmd, cursor);
                             }
                             None => {
                                 // clear current line
@@ -183,7 +332,7 @@ pub fn console_init() {
                                 cursor = 0;
                                 line_len = 0;
                                 let prompt = prompt_string();
-                                clear_line_and_redraw(&mut stdout, &prompt, "", cursor);
+                                redraw_shell_line(&prompt, "", cursor);
                             }
                         }
                         input_state = InputState::Normal;
@@ -192,8 +341,7 @@ pub fn console_init() {
                         // RIGHT arrow - move cursor right
                         if cursor < line_len {
                             cursor += 1;
-                            stdout.write_all(b"\x1b[C").ok();
-                            stdout.flush().ok();
+                            crate::guest_console::submit_host_bytes(b"\x1b[C");
                         }
                         input_state = InputState::Normal;
                     }
@@ -201,8 +349,7 @@ pub fn console_init() {
                         // LEFT arrow - move cursor left
                         if cursor > 0 {
                             cursor -= 1;
-                            stdout.write_all(b"\x1b[D").ok();
-                            stdout.flush().ok();
+                            crate::guest_console::submit_host_bytes(b"\x1b[D");
                         }
                         input_state = InputState::Normal;
                     }
@@ -220,4 +367,9 @@ pub fn console_init() {
             }
         }
     }
+}
+
+fn redraw_shell_line(prompt: &str, content: &str, cursor: usize) {
+    let output = redraw_line(prompt, content, cursor);
+    crate::guest_console::submit_host_bytes(&output);
 }

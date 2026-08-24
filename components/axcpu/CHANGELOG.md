@@ -1,5 +1,50 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.8.7](https://github.com/rcore-os/tgoskits/compare/ax-cpu-v0.8.6...ax-cpu-v0.8.7) - 2026-08-20
+
+### Added
+
+- *(starry-kernel)* consume user_access_ok_page in a lock-free user-copy fast path ([#2063](https://github.com/rcore-os/tgoskits/pull/2063))
+
+### Fixed
+
+- *(ax-cpu)* harden user access and architecture state transitions ([#2075](https://github.com/rcore-os/tgoskits/pull/2075))
+- *(cpu-local)* keep AArch64 current independent of TLS ([#1970](https://github.com/rcore-os/tgoskits/pull/1970))
+
+### Other
+
+- *(cpu-local)* define scheduler-neutral execution context boundary ([#2080](https://github.com/rcore-os/tgoskits/pull/2080))
+
+## [0.8.6](https://github.com/rcore-os/tgoskits/compare/ax-cpu-v0.8.5...ax-cpu-v0.8.6) - 2026-08-09
+
+### Fixed
+
+- *(ax-cpu)* handle cross-page unaligned faults ([#1855](https://github.com/rcore-os/tgoskits/pull/1855))
+
+### Other
+
+- *(memory)* unify page-table execution on page-table-generic ([#1911](https://github.com/rcore-os/tgoskits/pull/1911))
+
+## [0.8.5](https://github.com/rcore-os/tgoskits/compare/ax-cpu-v0.8.4...ax-cpu-v0.8.5) - 2026-08-03
+
+### Added
+
+- *(qperf)* support Starry x86_64 profiling ([#1785](https://github.com/rcore-os/tgoskits/pull/1785))
+- *(cpufreq)* RK3588 ondemand CPU DVFS with voltage calibration ([#1657](https://github.com/rcore-os/tgoskits/pull/1657))
+
+## [0.8.4](https://github.com/rcore-os/tgoskits/compare/ax-cpu-v0.8.3...ax-cpu-v0.8.4) - 2026-07-23
+
+### Other
+
+- *(cpu-local)* extract per-CPU register ownership ([#1662](https://github.com/rcore-os/tgoskits/pull/1662))
+- *(ci)* update Rust nightly to 2026-07-15 ([#1626](https://github.com/rcore-os/tgoskits/pull/1626))
+
+### Changed
+
+- *(host-test)* use the unprivileged FXSAVE fallback when scheduler tests run outside ring 0.
+
 ## [0.8.3](https://github.com/rcore-os/tgoskits/compare/ax-cpu-v0.8.2...ax-cpu-v0.8.3) - 2026-07-08
 
 ### Added

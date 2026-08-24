@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/rcore-os/tgoskits/compare/realtek-rtl8125-v0.2.12...realtek-rtl8125-v0.3.0) - 2026-08-20
+
+### Added
+
+- *(dma-api)* [**breaking**] add device DMA coherency with uncached-alias remap ([#2106](https://github.com/rcore-os/tgoskits/pull/2106))
+- *(starry)* add reproducible iperf3 board benchmark ([#1948](https://github.com/rcore-os/tgoskits/pull/1948))
+
+### Other
+
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+## [0.2.12](https://github.com/rcore-os/tgoskits/compare/realtek-rtl8125-v0.2.11...realtek-rtl8125-v0.2.12) - 2026-08-09
+
+### Other
+
+- updated the following local packages: ax-kspin, dma-api, rdif-eth, mmio-api
+
+## [0.2.11](https://github.com/rcore-os/tgoskits/compare/realtek-rtl8125-v0.2.10...realtek-rtl8125-v0.2.11) - 2026-08-03
+
+### Other
+
+- updated the following local packages: ax-kspin, dma-api, rdif-eth, mmio-api
+
+## [0.2.10](https://github.com/rcore-os/tgoskits/compare/realtek-rtl8125-v0.2.9...realtek-rtl8125-v0.2.10) - 2026-07-23
+
+### Fixed
+
+- *(realtek-rtl8125)* advertise gigabit autonegotiation ([#1583](https://github.com/rcore-os/tgoskits/pull/1583))
+
 ## [0.2.9](https://github.com/rcore-os/tgoskits/compare/realtek-rtl8125-v0.2.8...realtek-rtl8125-v0.2.9) - 2026-07-08
 
 ### Other

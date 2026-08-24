@@ -26,7 +26,7 @@ impl Manager {
 
     pub fn unregistered(&mut self) -> Result<Vec<DriverRegister>, ProbeError> {
         let mut out = self.registers.unregistered();
-        out.sort_by_key(|a| a.priority);
+        out.sort_by_key(|a| (a.level, a.priority));
         Ok(out)
     }
 }
@@ -48,6 +48,12 @@ impl DeviceContainer {
             );
         }
         devices.push(DeviceOwner::new(descriptor, device));
+    }
+
+    pub(crate) fn can_insert<T: DriverGeneric>(&self, device_id: DeviceId) -> bool {
+        self.devices
+            .get(&device_id)
+            .is_none_or(|devices| !devices.iter().any(DeviceOwner::is::<T>))
     }
 
     pub fn get_typed<T: DriverGeneric>(&self, id: DeviceId) -> Result<Device<T>, GetDeviceError> {

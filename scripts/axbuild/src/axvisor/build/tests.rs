@@ -68,6 +68,106 @@ fn request(path: PathBuf, arch: &str, target: &str) -> ResolvedAxvisorRequest {
 }
 
 #[test]
+fn axvisor_ax_std_dependency_declares_std_compat() {
+    let metadata = crate::build::workspace_metadata().unwrap();
+    let package = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == AXVISOR_PACKAGE)
+        .unwrap();
+    let ax_std = package
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.name == "ax-std")
+        .unwrap();
+
+    assert!(
+        ax_std
+            .features
+            .iter()
+            .any(|feature| feature == "std-compat"),
+        "Axvisor must declare ax-std/std-compat in its dependency instead of relying on axbuild"
+    );
+}
+
+#[test]
+fn axvisor_host_xtask_is_opt_in() {
+    let metadata = crate::build::workspace_metadata().unwrap();
+    let package = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == AXVISOR_PACKAGE)
+        .unwrap();
+    let target = package
+        .targets
+        .iter()
+        .find(|target| target.name == "xtask")
+        .unwrap();
+
+    assert_eq!(
+        target.required_features,
+        ["host-xtask"],
+        "the host build tool must not be linked as part of kernel integration tests"
+    );
+}
+
+#[test]
+fn axvisor_all_architectures_use_rust_std_musl_with_abort_panics() {
+    let cases = [
+        (
+            "x86_64",
+            "x86_64-unknown-none",
+            "x86_64-unknown-linux-musl.json",
+        ),
+        (
+            "aarch64",
+            "aarch64-unknown-none-softfloat",
+            "aarch64-unknown-linux-musl.json",
+        ),
+        (
+            "riscv64",
+            "riscv64gc-unknown-none-elf",
+            "riscv64gc-unknown-linux-musl.json",
+        ),
+        (
+            "loongarch64",
+            "loongarch64-unknown-none-softfloat",
+            "loongarch64-unknown-linux-musl.json",
+        ),
+    ];
+
+    for (arch, target, std_target) in cases {
+        let root = tempdir().unwrap();
+        let config_path = root.path().join(format!(".{arch}-build.toml"));
+        fs::write(&config_path, "features = []\nlog = \"Info\"\n").unwrap();
+
+        let cargo = load_cargo_config(&request(config_path, arch, target)).unwrap();
+        assert!(
+            cargo
+                .target
+                .ends_with(&format!("scripts/targets/std/pie/{std_target}")),
+            "{arch} Axvisor must use its RustStd/musl PIE target"
+        );
+
+        let config: toml::Table =
+            toml::from_str(&fs::read_to_string(cargo.extra_config.unwrap()).unwrap()).unwrap();
+        assert_eq!(
+            config["unstable"]["build-std"].as_array().unwrap(),
+            &vec![
+                toml::Value::String("std".to_string()),
+                toml::Value::String("panic_abort".to_string()),
+            ],
+            "{arch} Axvisor must build real Rust std and panic_abort"
+        );
+        assert_eq!(
+            config["profile"]["release"]["panic"].as_str(),
+            Some("abort"),
+            "{arch} Axvisor release profile must abort on panic"
+        );
+    }
+}
+
+#[test]
 fn resolve_build_info_path_uses_default_axvisor_location() {
     let root = tempdir().unwrap();
     let path = resolve_build_info_path(
@@ -156,6 +256,9 @@ fn load_cargo_config_injects_vmconfigs() {
     let root = tempdir().unwrap();
     let config_path = root.path().join(".build.toml");
     let vmconfigs = vec![root.path().join("a.toml"), root.path().join("b.toml")];
+    for vmconfig in &vmconfigs {
+        fs::write(vmconfig, "[kernel]\n").unwrap();
+    }
     fs::write(
         &config_path,
         r#"
@@ -209,6 +312,49 @@ log = "Info"
             .find_map(|window| (window[0] == "--bin").then_some(window[1].as_str())),
         Some("axvisor")
     );
+}
+
+#[test]
+fn load_cargo_config_does_not_select_an_x86_backend() {
+    let root = tempdir().unwrap();
+    let config_path = root.path().join("build-x86_64.toml");
+    fs::write(
+        &config_path,
+        r#"
+features = []
+log = "Info"
+"#,
+    )
+    .unwrap();
+
+    let cargo = load_cargo_config(&request(config_path, "x86_64", "x86_64-unknown-none")).unwrap();
+
+    assert!(!cargo.features.contains(&"vmx".to_string()));
+    assert!(!cargo.features.contains(&"svm".to_string()));
+}
+
+#[test]
+fn load_cargo_config_rejects_explicit_x86_backend_features() {
+    for feature in ["vmx", "svm"] {
+        let root = tempdir().unwrap();
+        let config_path = root.path().join(format!("build-x86_64-{feature}.toml"));
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+features = ["{feature}"]
+log = "Info"
+"#
+            ),
+        )
+        .unwrap();
+
+        let err =
+            load_cargo_config(&request(config_path, "x86_64", "x86_64-unknown-none")).unwrap_err();
+
+        assert!(err.to_string().contains("selected from CPU capabilities"));
+        assert!(err.to_string().contains(&format!("`{feature}`")));
+    }
 }
 
 #[test]
@@ -306,7 +452,7 @@ fn load_cargo_config_uses_board_defaults_when_default_file_is_missing() {
         "qemu-x86_64",
         r#"
 target = "x86_64-unknown-none"
-features = ["fs", "vmx"]
+features = ["fs"]
 log = "Info"
 vm_configs = []
 "#,
@@ -332,7 +478,7 @@ vm_configs = []
         fs::read_to_string(board_path).unwrap()
     );
     assert!(cargo.features.contains(&"fs".to_string()));
-    assert!(cargo.features.contains(&"vmx".to_string()));
+    assert!(!cargo.features.contains(&"vmx".to_string()));
     assert!(!cargo.features.contains(&"plat-dyn".to_string()));
     assert!(!cargo.features.contains(&"ax-std/plat-dyn".to_string()));
     assert!(!cargo.features.contains(&"axvm/plat-dyn".to_string()));
@@ -411,7 +557,7 @@ fn load_cargo_config_uses_dynamic_x86_platform_from_board_config() {
     fs::write(
         &config_path,
         r#"
-features = ["ax-driver/virtio-blk", "fs", "vmx"]
+features = ["ax-driver/nvme", "fs"]
 log = "Info"
 "#,
     )
@@ -452,7 +598,7 @@ fn load_cargo_config_defaults_x86_to_dynamic_platform_when_omitted() {
     fs::write(
         &config_path,
         r#"
-features = ["fs", "vmx"]
+features = ["fs"]
 log = "Info"
 "#,
     )
@@ -488,7 +634,7 @@ fn load_cargo_config_applies_stack_protector_from_makefile_features() {
     fs::write(
         &config_path,
         r#"
-features = ["fs", "vmx"]
+features = ["fs"]
 log = "Info"
 "#,
     )
@@ -518,7 +664,7 @@ log = "Info"
 }
 
 #[test]
-fn load_cargo_config_keeps_loongarch_dynamic_axvisor_as_elf() {
+fn load_cargo_config_prepares_loongarch_dynamic_axvisor_runtime_artifact() {
     let root = tempdir().unwrap();
     let config_path = root.path().join(".build.toml");
     fs::write(

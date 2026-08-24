@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.33](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.32...ax-posix-api-v0.5.33) - 2026-08-20
+
+### Fixed
+
+- *(console)* unify sleepable runtime console arbitration ([#2113](https://github.com/rcore-os/tgoskits/pull/2113))
+- *(ax-std)* implement futimens for regular files ([#1950](https://github.com/rcore-os/tgoskits/pull/1950))
+
+### Other
+
+- *(errors)* introduce domain-owned error boundaries ([#2024](https://github.com/rcore-os/tgoskits/pull/2024))
+- *(sync)* move lock implementation into ax-task ([#1962](https://github.com/rcore-os/tgoskits/pull/1962))
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+## [0.5.32](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.31...ax-posix-api-v0.5.32) - 2026-08-09
+
+### Added
+
+- *(posix)* implement eventfd and bridge epoll for std async ([#1887](https://github.com/rcore-os/tgoskits/pull/1887))
+
+### Fixed
+
+- *(axvisor)* correct shell filesystem command handling ([#1616](https://github.com/rcore-os/tgoskits/pull/1616))
+
+### Other
+
+- *(axvm)* unify guest devices and AArch64 timer ownership ([#1717](https://github.com/rcore-os/tgoskits/pull/1717))
+
+## [0.5.31](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.30...ax-posix-api-v0.5.31) - 2026-08-03
+
+### Other
+
+- update Cargo.toml dependencies
+
+## [0.5.30](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.29...ax-posix-api-v0.5.30) - 2026-07-23
+
+### Other
+
+- *(cpu-local)* extract per-CPU register ownership ([#1662](https://github.com/rcore-os/tgoskits/pull/1662))
+
+## [0.5.29](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.28...ax-posix-api-v0.5.29) - 2026-07-10
+
+### Other
+
+- updated the following local packages: ax-hal, ax-runtime, ax-alloc, ax-task, ax-sync, ax-fs-ng, ax-net
+
+## [0.5.28](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.27...ax-posix-api-v0.5.28) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-hal, ax-runtime, ax-alloc, ax-task, ax-sync, ax-fs-ng, ax-net
+
 ## [0.5.27](https://github.com/rcore-os/tgoskits/compare/ax-posix-api-v0.5.26...ax-posix-api-v0.5.27) - 2026-07-08
 
 ### Other

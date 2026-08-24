@@ -1,12 +1,10 @@
 use alloc::collections::BTreeMap;
 use core::{
-    fmt,
     pin::Pin,
     task::{Context, Poll, Waker},
     time::Duration,
 };
 
-use ax_errno::AxError;
 use ax_hal::time::{TimeValue, monotonic_time, wall_time};
 use futures_util::{FutureExt, select_biased};
 
@@ -87,8 +85,7 @@ percpu_static! {
 
 #[allow(dead_code)]
 pub(crate) fn check_timer_events() {
-    // SAFETY: only called in timer::check_events
-    unsafe { TIMER_RUNTIME.current_ref_mut_raw() }.wake();
+    with_current(TimerRuntime::wake);
 }
 
 #[cfg(feature = "irq")]
@@ -97,9 +94,17 @@ pub(crate) fn next_timer_deadline() -> Option<TimeValue> {
 }
 
 fn with_current<R>(f: impl FnOnce(&mut TimerRuntime) -> R) -> R {
-    // FIXME: optimize `ax-percpu` crate! should disable irq and provide more apis
-    let _g = ax_kernel_guard::NoPreemptIrqSave::new();
-    f(unsafe { TIMER_RUNTIME.current_ref_mut_raw() })
+    let _g = crate::sync::PreemptIrqSaveGuard::new();
+    // SAFETY: the guard excludes migration, IRQ/re-entry, and conflicting
+    // access for the complete non-escaping mutable borrow.
+    unsafe {
+        ax_hal::percpu::with_cpu_pin(|pin| {
+            ax_hal::percpu::with_exclusive_cpu(pin, |exclusive| {
+                TIMER_RUNTIME.with_current_mut(exclusive, f)
+            })
+        })
+    }
+    .expect("timer runtime access requires an installed CPU-local area")
 }
 
 /// Future returned by `sleep` and `sleep_until`.
@@ -136,22 +141,9 @@ pub async fn sleep_until(deadline: TimeValue) {
 }
 
 /// Error returned by [`timeout`] and [`timeout_at`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("task deadline elapsed")]
 pub struct Elapsed(());
-
-impl fmt::Display for Elapsed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "deadline elapsed")
-    }
-}
-
-impl core::error::Error for Elapsed {}
-
-impl From<Elapsed> for AxError {
-    fn from(_: Elapsed) -> Self {
-        AxError::TimedOut
-    }
-}
 
 /// Requires a `Future` to complete before the specified duration has elapsed.
 pub async fn timeout<F: IntoFuture>(

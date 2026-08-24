@@ -1,9 +1,14 @@
+use std::path::Path;
+
 use tempfile::tempdir;
 
 use super::{discover_case_build_config, discover_optional_build_config};
-use crate::starry::app::{
-    discover_apps,
-    test_support::{write_case_file, write_minimal_board_case},
+use crate::starry::{
+    app::{
+        discover_apps,
+        test_support::{write_case_file, write_minimal_board_case},
+    },
+    board,
 };
 
 #[test]
@@ -93,32 +98,32 @@ fn qemu_build_config_can_come_from_nearest_parent() {
     let root = tempdir().unwrap();
     let outer = write_case_file(
         root.path(),
-        "qemu-smp1",
+        "qemu",
         "build-x86_64-unknown-none.toml",
         "target = \"x86_64-unknown-none\"\nfeatures = []\nlog = \"Info\"\n",
     );
     let inner = write_case_file(
         root.path(),
-        "qemu-smp1/nested",
+        "qemu/nested",
         "build-x86_64-unknown-none.toml",
         "target = \"x86_64-unknown-none\"\nfeatures = [\"nearest\"]\nlog = \"Info\"\n",
     );
     write_case_file(
         root.path(),
-        "qemu-smp1/nested/codex-cli",
+        "qemu/nested/codex-cli",
         "prebuild.sh",
         "#!/usr/bin/env bash\n",
     );
     write_case_file(
         root.path(),
-        "qemu-smp1/nested/codex-cli",
+        "qemu/nested/codex-cli",
         "qemu-x86_64.toml",
         "args = []\n",
     );
     let app = discover_apps(root.path())
         .unwrap()
         .into_iter()
-        .find(|app| app.name == "qemu-smp1/nested/codex-cli")
+        .find(|app| app.name == "qemu/nested/codex-cli")
         .unwrap();
 
     let selected = discover_optional_build_config(&app.case_dir, "x86_64-unknown-none")
@@ -169,4 +174,29 @@ fn board_case_still_accepts_minimal_build_config() {
 
     assert!(path.ends_with("build-aarch64-unknown-none-softfloat.toml"));
     assert_eq!(target, "aarch64-unknown-none-softfloat");
+}
+
+#[test]
+fn claw_code_regression_inherits_nvme_build_configs() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap();
+    let case_dir = workspace_root.join("apps/starry/claw-code-regression/goal-01-unshare");
+
+    for target in ["x86_64-unknown-none", "riscv64gc-unknown-none-elf"] {
+        let selected = discover_optional_build_config(&case_dir, target)
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing inherited build config for target `{target}`"));
+        let build_config = board::load_board_file(&selected).unwrap();
+        assert!(
+            build_config
+                .build_info
+                .features
+                .iter()
+                .any(|feature| feature == "ax-driver/nvme"),
+            "{} must enable the NVMe root device driver",
+            selected.display()
+        );
+    }
 }

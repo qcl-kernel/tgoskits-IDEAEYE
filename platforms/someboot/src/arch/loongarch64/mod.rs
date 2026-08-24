@@ -25,16 +25,18 @@ use loongArch64::{
 pub use paging::Entry as Pte;
 pub use relocate::relocate;
 
-use crate::{ArchTrait, DCacheOp, efi_stub, irq::IrqId, power::CpuOnError};
+use crate::{ArchTrait, DCacheOp, SystimerArch, efi_stub, irq::IrqId, power::CpuOnError};
 
-const MIN_TICKS: usize = 4;
+#[cfg(feature = "tls")]
 const BOOT_TLS_SIZE: usize = 64 * 1024;
 
+#[cfg(feature = "tls")]
 #[repr(C, align(16))]
 struct BootTls {
     bytes: [u8; BOOT_TLS_SIZE],
 }
 
+#[cfg(feature = "tls")]
 static mut BOOT_TLS: BootTls = BootTls {
     bytes: [0; BOOT_TLS_SIZE],
 };
@@ -68,36 +70,31 @@ impl ArchTrait for Arch {
     fn post_allocator() {}
 
     fn init_boot_tls() {
-        unsafe extern "C" {
-            fn _stdata();
-            fn _etdata();
-            fn _etbss();
-        }
+        #[cfg(feature = "tls")]
+        {
+            unsafe extern "C" {
+                fn _stdata();
+                fn _etdata();
+                fn _etbss();
+            }
 
-        let stdata = _stdata as *const () as usize;
-        let etdata = _etdata as *const () as usize;
-        let etbss = _etbss as *const () as usize;
-        if etdata < stdata || etbss < stdata {
-            return;
-        }
+            let stdata = _stdata as *const () as usize;
+            let etdata = _etdata as *const () as usize;
+            let etbss = _etbss as *const () as usize;
+            if etdata < stdata || etbss < etdata {
+                boot_tls_layout_fatal();
+            }
 
-        let tls_size = align_up(etbss - stdata, 16);
-        if tls_size > BOOT_TLS_SIZE {
-            return;
-        }
+            let tls_size = align_up(etbss - stdata, 16);
+            if tls_size > BOOT_TLS_SIZE {
+                boot_tls_layout_fatal();
+            }
 
-        unsafe {
-            let boot_tls = core::ptr::addr_of_mut!(BOOT_TLS).cast::<u8>();
-            core::ptr::write_bytes(boot_tls, 0, tls_size);
-            core::ptr::copy_nonoverlapping(stdata as *const u8, boot_tls, etdata - stdata);
-            core::arch::asm!("move $tp, {}", in(reg) boot_tls as usize, options(nostack));
-        }
-    }
-
-    fn init_runtime_percpu_reg(cpu_idx: usize) {
-        if let Some(percpu) = crate::smp::percpu_data_ptr(cpu_idx) {
             unsafe {
-                core::arch::asm!("move $r21, {}", in(reg) percpu as usize);
+                let boot_tls = core::ptr::addr_of_mut!(BOOT_TLS).cast::<u8>();
+                core::ptr::write_bytes(boot_tls, 0, tls_size);
+                core::ptr::copy_nonoverlapping(stdata as *const u8, boot_tls, etdata - stdata);
+                core::arch::asm!("move $tp, {}", in(reg) boot_tls as usize, options(nostack));
             }
         }
     }
@@ -106,50 +103,18 @@ impl ArchTrait for Arch {
         trap::per_cpu_trap_init(is_primary);
     }
 
-    fn systimer_enable() {
-        tcfg::set_en(true);
-    }
-
-    fn systimer_irq_enable() {
-        tcfg::set_en(true);
-    }
-
-    fn systimer_irq_disable() {
-        tcfg::set_en(false);
-    }
-
-    fn systimer_irq_is_enabled() -> bool {
-        tcfg::read().en()
-    }
-    fn systimer_set_interval(ticks: usize) {
-        let ticks = ticks.max(MIN_TICKS);
-        // Ensure the value is aligned to a multiple of 4 as required by TCFG
-        let ticks = (ticks + 3) & !3;
-
-        // 先禁用定时器
-        tcfg::set_en(false);
-        // 设置单次模式
-        tcfg::set_periodic(false);
-        // 设置初始值
-        tcfg::set_init_val(ticks);
-        // 清除可能存在的中断
-        ticlr::clear_timer_interrupt();
-        // Arm the one-shot event. Linux and the static LoongArch platform both
-        // program the next event with TCFG.EN set; leaving it disabled stalls
-        // timer-based sleeps after the first reprogram.
-        tcfg::set_en(true);
-    }
-
-    fn systimer_ack() {
-        ticlr::clear_timer_interrupt();
-    }
-
     fn systimer_freq() -> usize {
         get_timer_freq()
     }
 
     fn systimer_tick() -> usize {
         Time::read()
+    }
+
+    fn systimer_stability() -> crate::timer::CounterStability {
+        // The constant timer reads the architecture's stable counter shared
+        // across logical CPUs rather than a CPU-local cycle counter.
+        crate::timer::CounterStability::Stable
     }
 
     fn shutdown() -> ! {
@@ -186,48 +151,6 @@ impl ArchTrait for Arch {
 
     fn irq_all_set_enable(enable: bool) {
         crmd::set_ie(enable);
-    }
-
-    fn irq_is_enabled(irq: IrqId) -> bool {
-        use loongArch64::register::ecfg::{self, LineBasedInterrupt};
-
-        match irq.kind() {
-            trap::IrqKind::Private(hwirq) => {
-                // 对于 CPU 本地中断，检查 ECFG.LIE 对应位
-                // ECFG.LIE 位 0-12 对应中断 0-12 (SWI0-1, HWI0-7, PCOV, TI, IPI)
-                let lie = ecfg::read().lie();
-                let mask = LineBasedInterrupt::from_bits_retain(1 << hwirq);
-                lie.contains(mask)
-            }
-            trap::IrqKind::External(_hwirq) => {
-                // 外部中断需要通过级联中断控制器来检查
-                // 目前暂不支持，返回 false
-                false
-            }
-        }
-    }
-
-    fn irq_set_enable(irq: IrqId, enable: bool) {
-        use loongArch64::register::ecfg::{self, LineBasedInterrupt};
-
-        match irq.kind() {
-            trap::IrqKind::Private(hwirq) => {
-                // 对于 CPU 本地中断，设置 ECFG.LIE 对应位
-                // 参考 Linux: set_csr_ecfg(ECFGF(d->hwirq)) / clear_csr_ecfg(ECFGF(d->hwirq))
-                let current_lie = ecfg::read().lie();
-                let mask = LineBasedInterrupt::from_bits_retain(1 << hwirq);
-                let new_lie = if enable {
-                    current_lie | mask
-                } else {
-                    current_lie - mask
-                };
-                ecfg::set_lie(new_lie);
-            }
-            trap::IrqKind::External(_hwirq) => {
-                // 外部中断需要通过级联中断控制器来设置
-                // 目前暂不支持
-            }
-        }
     }
 
     fn kernel_page_table() -> crate::mem::PageTableInfo {
@@ -321,7 +244,7 @@ impl ArchTrait for Arch {
         crmd::read().pg()
     }
 
-    fn cpu_on(hartid: usize, entry: usize, arg: usize) -> Result<(), CpuOnError> {
+    fn kick_secondary_cpu(hartid: usize, entry: usize, arg: usize) -> Result<(), CpuOnError> {
         power::cpu_on(hartid, entry, arg)
     }
 
@@ -339,6 +262,103 @@ impl ArchTrait for Arch {
     }
 }
 
+impl SystimerArch for Arch {
+    fn systimer_irq_id() -> IrqId {
+        irq::systimer_irq()
+    }
+
+    fn systimer_enable() {
+        tcfg::set_en(true);
+    }
+
+    fn systimer_irq_enable() {
+        tcfg::set_en(true);
+    }
+
+    fn systimer_irq_disable() {
+        tcfg::set_en(false);
+    }
+
+    fn systimer_irq_is_enabled() -> bool {
+        tcfg::read().en()
+    }
+
+    fn systimer_set_interval(ticks: usize) {
+        let ticks = crate::timer::loongarch64_interval::aligned_ticks(ticks);
+
+        // 先禁用定时器
+        tcfg::set_en(false);
+        // 设置单次模式
+        tcfg::set_periodic(false);
+        // 设置初始值
+        tcfg::set_init_val(ticks);
+        // 清除可能存在的中断
+        ticlr::clear_timer_interrupt();
+        // Arm the one-shot event. Linux and the static LoongArch platform both
+        // program the next event with TCFG.EN set; leaving it disabled stalls
+        // timer-based sleeps after the first reprogram.
+        tcfg::set_en(true);
+    }
+
+    /// The pending timer interrupt latches in TICLR and must be cleared
+    /// explicitly, overriding the re-arm-clears default.
+    fn systimer_ack() {
+        ticlr::clear_timer_interrupt();
+    }
+
+    /// LoongArch masks every CPU-local line through ECFG.LIE, so the per-line
+    /// pair covers all private lines (timer, IPI, cascaded controllers), not
+    /// just the system-timer line the default knows.
+    fn irq_is_enabled(irq: IrqId) -> bool {
+        use loongArch64::register::ecfg::{self, LineBasedInterrupt};
+
+        match irq.kind() {
+            trap::IrqKind::Private(hwirq) => {
+                // 对于 CPU 本地中断，检查 ECFG.LIE 对应位
+                // ECFG.LIE 位 0-12 对应中断 0-12 (SWI0-1, HWI0-7, PCOV, TI, IPI)
+                let lie = ecfg::read().lie();
+                let mask = LineBasedInterrupt::from_bits_retain(1 << hwirq);
+                lie.contains(mask)
+            }
+            trap::IrqKind::External(_hwirq) => {
+                // 外部中断需要通过级联中断控制器来检查
+                // 目前暂不支持，返回 false
+                false
+            }
+        }
+    }
+
+    fn irq_set_enable(irq: IrqId, enable: bool) {
+        use loongArch64::register::ecfg::{self, LineBasedInterrupt};
+
+        match irq.kind() {
+            trap::IrqKind::Private(hwirq) => {
+                // 对于 CPU 本地中断，设置 ECFG.LIE 对应位
+                // 参考 Linux: set_csr_ecfg(ECFGF(d->hwirq)) / clear_csr_ecfg(ECFGF(d->hwirq))
+                let current_lie = ecfg::read().lie();
+                let mask = LineBasedInterrupt::from_bits_retain(1 << hwirq);
+                let new_lie = if enable {
+                    current_lie | mask
+                } else {
+                    current_lie - mask
+                };
+                ecfg::set_lie(new_lie);
+            }
+            trap::IrqKind::External(_hwirq) => {
+                // 外部中断需要通过级联中断控制器来设置
+                // 目前暂不支持
+            }
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+#[cold]
+fn boot_tls_layout_fatal() -> ! {
+    panic!("invalid or oversized LoongArch bootstrap TLS image")
+}
+
+#[cfg(feature = "tls")]
 const fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }

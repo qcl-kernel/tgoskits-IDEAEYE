@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.9](https://github.com/rcore-os/tgoskits/compare/ax-display-v0.6.8...ax-display-v0.6.9) - 2026-08-20
+
+### Other
+
+- *(sync)* move lock implementation into ax-task ([#1962](https://github.com/rcore-os/tgoskits/pull/1962))
+- *(sync)* unify lock primitives in ax-sync ([#1956](https://github.com/rcore-os/tgoskits/pull/1956))
+
+## [0.6.8](https://github.com/rcore-os/tgoskits/compare/ax-display-v0.6.7...ax-display-v0.6.8) - 2026-08-09
+
+### Other
+
+- updated the following local packages: irq-framework, ax-lazyinit, rdif-display, ax-sync
+
+## [0.6.7](https://github.com/rcore-os/tgoskits/compare/ax-display-v0.6.6...ax-display-v0.6.7) - 2026-08-03
+
+### Other
+
+- updated the following local packages: ax-lazyinit, irq-framework, rdif-display, ax-sync
+
+## [0.6.6](https://github.com/rcore-os/tgoskits/compare/ax-display-v0.6.5...ax-display-v0.6.6) - 2026-07-23
+
+### Other
+
+- updated the following local packages: ax-sync
+
+## [0.6.5](https://github.com/rcore-os/tgoskits/compare/ax-display-v0.6.4...ax-display-v0.6.5) - 2026-07-10
+
+### Other
+
+- updated the following local packages: ax-sync
+
+## [0.6.4](https://github.com/rcore-os/tgoskits/compare/ax-display-v0.6.3...ax-display-v0.6.4) - 2026-07-08
+
+### Other
+
+- updated the following local packages: ax-sync
+
 ## [0.6.3](https://github.com/rcore-os/tgoskits/compare/ax-display-v0.6.2...ax-display-v0.6.3) - 2026-07-08
 
 ### Other

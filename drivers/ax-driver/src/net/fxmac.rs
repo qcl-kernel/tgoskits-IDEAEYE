@@ -5,7 +5,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use ax_kspin::SpinRaw as Mutex;
+use ax_sync::SpinLock as Mutex;
 use dma_api::{DmaAddr, DmaAllocHandle, DmaConstraints, DmaOp};
 use fxmac_rs::{FXmac, FXmacGetMacAddress, FXmacLwipPortTx, FXmacRecvHandler, xmac_init};
 use rd_net::{DmaBuffer, Event, IRxQueue, ITxQueue, NetError, QueueConfig};
@@ -34,18 +34,28 @@ crate::model_register!(
 );
 
 fn probe_fdt(probe: rdrive::register::ProbeFdt<'_>) -> Result<(), rdrive::probe::OnProbeError> {
+    let dma = axklib::dma::device(dma_api::DmaDeviceInfo::new(
+        dma_api::DmaDomainId::Direct,
+        crate::binding_resolver::dma_coherency_from_fdt(probe.info()),
+        dma_api::DmaConstraints::new(u64::MAX),
+    ));
     let info = binding_info_from_fdt(probe.info())?;
     let dev = FxmacNet::new();
     probe
         .into_platform_device()
-        .register_net_with_info(DRIVER_NAME, dev, info);
+        .register_net_with_info(DRIVER_NAME, dev, dma, info);
     log::info!("registered FXmac FDT network device");
     Ok(())
 }
 
 pub fn register(plat_dev: PlatformDevice) {
     let dev = FxmacNet::new();
-    plat_dev.register_net(DRIVER_NAME, dev);
+    let dma = axklib::dma::device(dma_api::DmaDeviceInfo::new(
+        dma_api::DmaDomainId::Direct,
+        dma_api::DmaCoherency::NonCoherent,
+        dma_api::DmaConstraints::new(u64::MAX),
+    ));
+    plat_dev.register_net(DRIVER_NAME, dev, dma);
     log::info!("registered FXmac network device");
 }
 
@@ -120,12 +130,14 @@ impl rd_net::Interface for FxmacNet {
     }
 
     fn enable_irq(&mut self) {
-        self.hw.lock().device.enable_irq();
+        // SAFETY: device IRQ setup is serialized before the handler is exposed.
+        unsafe { self.hw.lock_raw() }.device.enable_irq();
         self.irq_enabled = true;
     }
 
     fn disable_irq(&mut self) {
-        self.hw.lock().device.disable_irq();
+        // SAFETY: device teardown excludes handler re-entry.
+        unsafe { self.hw.lock_raw() }.device.disable_irq();
         self.irq_enabled = false;
     }
 
@@ -219,7 +231,8 @@ struct FxmacIrqHandler {
 
 impl rd_net::InterfaceIrqHandler for FxmacIrqHandler {
     fn handle_irq(&mut self) -> Event {
-        if let Some(mut hw) = self.hw.try_lock() {
+        // SAFETY: the IRQ handler already runs in a non-reentrant local context.
+        if let Some(mut hw) = unsafe { self.hw.try_lock_raw() } {
             let status = hw.device.handle_irq();
             return self.irq_state.publish(status.tx_ready(), status.rx_ready());
         }
@@ -262,7 +275,8 @@ impl ITxQueue for FxmacTxQueue {
 
     fn submit(&mut self, buffer: DmaBuffer) -> Result<(), NetError> {
         let packet = unsafe { core::slice::from_raw_parts(buffer.virt.as_ptr(), buffer.len) };
-        let mut hw = self.hw.lock();
+        // SAFETY: TX submission is serialized against local device re-entry.
+        let mut hw = unsafe { self.hw.lock_raw() };
         self.irq_state.drain_pending_irq_ack(&mut hw);
         let ret = FXmacLwipPortTx(hw.device, vec![packet.to_vec()]);
         self.irq_state.drain_pending_irq_ack(&mut hw);
@@ -270,13 +284,17 @@ impl ITxQueue for FxmacTxQueue {
             return Err(NetError::Retry);
         }
         drop(hw);
-        self.tx_state.lock().tx_done.push_back(buffer.bus_addr);
+        // SAFETY: the queue path excludes local re-entry while publishing completion.
+        unsafe { self.tx_state.lock_raw() }
+            .tx_done
+            .push_back(buffer.bus_addr);
         Ok(())
     }
 
     fn reclaim(&mut self) -> Option<u64> {
         let _ = self.irq_state.take_tx_pending();
-        self.tx_state.lock().tx_done.pop_front()
+        // SAFETY: the queue consumer excludes local re-entry.
+        unsafe { self.tx_state.lock_raw() }.tx_done.pop_front()
     }
 }
 
@@ -296,17 +314,22 @@ impl IRxQueue for FxmacRxQueue {
     }
 
     fn submit(&mut self, buffer: DmaBuffer) -> Result<(), NetError> {
-        self.rx_state.lock().rx_buffers.push_back(buffer.into());
+        // SAFETY: RX buffer installation is serialized by the queue owner.
+        unsafe { self.rx_state.lock_raw() }
+            .rx_buffers
+            .push_back(buffer.into());
         Ok(())
     }
 
     fn reclaim(&mut self) -> Option<(u64, usize)> {
-        let mut rx_state = self.rx_state.lock();
+        // SAFETY: RX dequeue runs in the queue owner's non-reentrant context.
+        let mut rx_state = unsafe { self.rx_state.lock_raw() };
         if rx_state.rx_buffers.is_empty() {
             return None;
         }
 
-        let mut hw = self.hw.lock();
+        // SAFETY: RX polling excludes local device re-entry.
+        let mut hw = unsafe { self.hw.lock_raw() };
         self.irq_state.drain_pending_irq_ack(&mut hw);
         let rx_pending = self.irq_state.take_rx_pending();
         if (rx_pending || rx_state.rx_packets.is_empty())
@@ -421,7 +444,10 @@ impl fxmac_rs::KernelFunc for FxmacKernelFunc {
             return;
         };
         let paddr = axklib::mem::virt_to_phys((vaddr.as_ptr() as usize).into()).as_usize();
-        let handle = unsafe { DmaAllocHandle::new(vaddr, DmaAddr::from(paddr as u64), layout) };
-        unsafe { axklib::dma::op().dealloc_coherent(handle) };
+        let handle =
+            unsafe { DmaAllocHandle::new(vaddr, vaddr, DmaAddr::from(paddr as u64), layout) };
+        if let Err(err) = unsafe { axklib::dma::op().dealloc_coherent(handle) } {
+            log::error!("FXmac DMA release failed; allocation quarantined: {err}");
+        }
     }
 }

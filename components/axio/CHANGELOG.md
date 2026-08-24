@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5](https://github.com/rcore-os/tgoskits/compare/ax-io-v0.6.4...ax-io-v0.6.5) - 2026-08-20
+
+### Other
+
+- *(axtest)* standardize Cargo and QEMU test flow ([#2088](https://github.com/rcore-os/tgoskits/pull/2088))
+- *(errors)* introduce domain-owned error boundaries ([#2024](https://github.com/rcore-os/tgoskits/pull/2024))
+
+## [0.6.4](https://github.com/rcore-os/tgoskits/compare/ax-io-v0.6.3...ax-io-v0.6.4) - 2026-08-09
+
+### Other
+
+- updated the following local packages: axtest, ax-errno
+
+## [0.6.3](https://github.com/rcore-os/tgoskits/compare/ax-io-v0.6.2...ax-io-v0.6.3) - 2026-08-03
+
+### Other
+
+- enhance axtest coverage for various starry-kernel contracts ([#1674](https://github.com/rcore-os/tgoskits/pull/1674))
+
+## [0.6.2](https://github.com/rcore-os/tgoskits/compare/ax-io-v0.6.1...ax-io-v0.6.2) - 2026-07-23
+
+### Other
+
+- *(ci)* update Rust nightly to 2026-07-15 ([#1626](https://github.com/rcore-os/tgoskits/pull/1626))
+
 ## [0.6.1](https://github.com/rcore-os/tgoskits/compare/ax-io-v0.6.0...ax-io-v0.6.1) - 2026-07-02
 
 ### Other

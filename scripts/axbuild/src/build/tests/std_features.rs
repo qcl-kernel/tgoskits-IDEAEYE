@@ -1,25 +1,119 @@
 use super::*;
 
 #[test]
+fn arceos_io_test_selects_a_concrete_fat_filesystem() {
+    let workspace = crate::context::workspace_root_path().unwrap();
+    let manifest_path = workspace.join("apps/arceos/io_test/Cargo.toml");
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let arceos_features = manifest["features"]["arceos"]
+        .as_array()
+        .expect("arceos-io_test must declare its ArceOS feature set");
+
+    assert!(
+        arceos_features
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .any(|feature| feature == "ax-std/fatfs"),
+        "{} must select FAT for its generated FAT32 NVMe rootfs",
+        manifest_path.display()
+    );
+}
+
+#[test]
+fn arceos_io_test_x86_uses_uefi_handoff() {
+    let workspace = crate::context::workspace_root_path().unwrap();
+    let config_path = workspace.join("apps/arceos/io_test/qemu-x86_64.toml");
+    let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+
+    assert_eq!(
+        config.get("uefi").and_then(toml::Value::as_bool),
+        Some(true),
+        "{} must use the supported x86_64 UEFI handoff",
+        config_path.display()
+    );
+    assert_eq!(
+        config.get("to_bin").and_then(toml::Value::as_bool),
+        Some(true),
+        "{} must retain the UEFI runner's explicit BIN artifact contract",
+        config_path.display()
+    );
+}
+
+#[test]
+fn axfs_vfs_enables_sleepable_mutexes() {
+    let workspace = crate::context::workspace_root_path().unwrap();
+    let manifest_path = workspace.join("fs/ax-fs-ng/Cargo.toml");
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let vfs_features = manifest["features"]["vfs"]
+        .as_array()
+        .expect("ax-fs-ng must declare its VFS feature set");
+
+    assert!(
+        vfs_features
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .any(|feature| feature == "ax-sync/sleep"),
+        "{} must keep filesystem I/O locks sleepable for channel-backed block completion",
+        manifest_path.display()
+    );
+}
+
+#[test]
+fn axfs_ng_axtest_excludes_the_host_sync_backend() {
+    let workspace = crate::context::workspace_root_path().unwrap();
+    let manifest_path = workspace.join("fs/ax-fs-ng/Cargo.toml");
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let host_test_features = manifest["features"]["host-test"]
+        .as_array()
+        .expect("ax-fs-ng must expose an explicit host-test feature");
+
+    assert!(
+        host_test_features
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .any(|feature| feature == "ax-sync/host-test"),
+        "{} must enable the host synchronization backend only through host-test",
+        manifest_path.display()
+    );
+
+    let dev_ax_sync_features = manifest
+        .get("dev-dependencies")
+        .and_then(toml::Value::as_table)
+        .and_then(|dependencies| dependencies.get("ax-sync"))
+        .and_then(toml::Value::as_table)
+        .and_then(|dependency| dependency.get("features"))
+        .and_then(toml::Value::as_array);
+    assert!(
+        dev_ax_sync_features.is_none_or(|features| {
+            features
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .all(|feature| feature != "host-test")
+        }),
+        "{} must not enable ax-sync/host-test for bare-metal axtest targets",
+        manifest_path.display()
+    );
+}
+
+#[test]
 fn std_build_nested_features_are_passed_through_not_enabled_on_app() {
-    let mut envs = HashMap::new();
     let mut features = vec![
-        "plat-dyn".to_string(),
-        "ax-driver/plat-dyn".to_string(),
-        "ax-driver/virtio-blk".to_string(),
+        "ax-driver/nvme".to_string(),
         "ax-driver/virtio-net".to_string(),
         "dns".to_string(),
     ];
 
     pass_std_build_nested_features(
-        &mut envs,
         &mut features,
         &["dns".to_string()],
         &[
             "dns".to_string(),
             "plat-dyn".to_string(),
             "std-compat".to_string(),
-            "virtio-blk".to_string(),
+            "nvme".to_string(),
             "virtio-net".to_string(),
         ],
     );
@@ -28,26 +122,22 @@ fn std_build_nested_features_are_passed_through_not_enabled_on_app() {
         features,
         vec![
             "ax-std/dns".to_string(),
-            "ax-std/std-compat".to_string(),
-            "ax-std/virtio-blk".to_string(),
+            "ax-std/nvme".to_string(),
             "ax-std/virtio-net".to_string(),
             "dns".to_string(),
         ]
     );
-    assert!(envs.is_empty());
 }
 
 #[test]
 fn std_build_runtime_features_are_passed_through_after_normalization() {
     let mut info = BuildInfo {
-        features: vec!["plat-dyn".to_string(), "dns".to_string()],
+        features: vec!["dns".to_string()],
         ..BuildInfo::default()
     };
 
     info.resolve_std_features();
-    let mut envs = HashMap::new();
     pass_std_build_nested_features(
-        &mut envs,
         &mut info.features,
         &["dns".to_string()],
         &[
@@ -59,13 +149,8 @@ fn std_build_runtime_features_are_passed_through_after_normalization() {
 
     assert_eq!(
         info.features,
-        vec![
-            "ax-std/dns".to_string(),
-            "ax-std/std-compat".to_string(),
-            "dns".to_string()
-        ]
+        vec!["ax-std/dns".to_string(), "dns".to_string()]
     );
-    assert!(envs.is_empty());
 }
 
 #[test]
@@ -95,15 +180,9 @@ fn std_build_cargo_config_builds_fake_lib_before_app() {
     );
     assert_eq!(
         cargo.features,
-        vec![
-            "arceos".to_string(),
-            "ax-std/dns".to_string(),
-            "ax-std/fs".to_string(),
-            "ax-std/smp".to_string(),
-            "ax-std/std-compat".to_string(),
-        ]
+        vec!["ax-std/dns".to_string(), "ax-std/fs".to_string(),]
     );
-    assert!(cargo.to_bin);
+    assert!(!cargo.to_bin);
     assert_eq!(
         cargo.env.get("CARGO_UNSTABLE_JSON_TARGET_SPEC"),
         Some(&"true".to_string())
