@@ -19,10 +19,13 @@ fi
 
 exec qemu-system-aarch64 \
     -machine virt,gic-version=2 \
+    -global virtio-mmio.force-legacy=false \
     -cpu cortex-a53 \
     -m 256M \
     -smp 1 \
-    -nographic \
-    -device loader,file="$BIN",addr=0x40080000 \
+    -display none \
+    -serial stdio \
+    -monitor none \
+    -device loader,file="$BIN",addr=0x40200000 \
     -device virtio-net-device,netdev=net0,mac=02:00:00:00:01:03 \
     -netdev tap,id=net0,ifname="$TAP",script=no,downscript=no
