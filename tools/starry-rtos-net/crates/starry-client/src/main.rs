@@ -1,15 +1,13 @@
-//! `starry-client` -- AXNET/1 TCP client for StarryOS.
+//! `starry-client`: AXNET/1 TCP client for StarryOS.
 //!
-//! Connects to the FreeRTOS RTOS server (192.168.100.3:5000 by default),
-//! performs a CONTROL(START) handshake, then measures:
-//!   - round-trip latency (avg / P50 / P95 / P99 / max) on CONTROL requests,
-//!   - effective application throughput (payload bytes / elapsed),
-//!   - heartbeat keep-alive every second,
-//!   - reconnect behaviour with exponential backoff when the server drops.
+//! Connects to the FreeRTOS server (192.168.100.3:5000 by default), performs
+//! the CONTROL handshake, then measures round-trip latency and throughput on
+//! CONTROL requests while keeping the connection alive with HEARTBEATs.  When
+//! the server drops, it reconnects with exponential backoff.
 //!
 //! Build a static musl binary for StarryOS's Alpine userspace:
 //!   cargo build --target x86_64-unknown-linux-musl --release
-//! The same binary also runs unmodified on a Linux host for testing.
+//! The same binary also runs unmodified on a Linux host.
 
 mod client;
 
