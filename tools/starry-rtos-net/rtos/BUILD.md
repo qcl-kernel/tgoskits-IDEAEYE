@@ -31,15 +31,28 @@ freertos-rtos/
 
 ```bash
 cd freertos-rtos/rtos
-make            # 产出 bin/rtos.elf 与 bin/rtos.bin
+make            # 产出 bin/rtos.elf 与 bin/rtos.bin（静态 IP 192.168.100.3，TAP 桥接用）
+make clean && make AXNET_DHCP=1   # DHCP 版（SLIRP 无 root 验证用）
 make clean      # 清理
 ```
+
+两种固件网络配置：
+
+| 版本            | 网络       | 用途                      |
+| --------------- | ---------- | ------------------------- |
+| `make`（默认）   | 静态 IP    | TAP/br0 桥接（方案主线）   |
+| `make AXNET_DHCP=1` | DHCP    | SLIRP 无 root 验证        |
 
 ## 产出拷贝回仓库
 
 ```bash
-cp bin/rtos.bin <repo>/tools/starry-rtos-net/rtos/rtos.bin
-cp bin/rtos.elf <repo>/tools/starry-rtos-net/rtos/rtos.elf   # 可选，便于 -kernel 启动
+# 静态版（TAP 桥接）
+cp bin/rtos.bin  <repo>/tools/starry-rtos-net/rtos/rtos.bin
+cp bin/rtos.elf  <repo>/tools/starry-rtos-net/rtos/rtos.elf
+
+# DHCP 版（SLIRP 验证，需先 make clean && make AXNET_DHCP=1）
+cp bin/rtos.bin  <repo>/tools/starry-rtos-net/rtos/rtos-dhcp.bin
+cp bin/rtos.elf  <repo>/tools/starry-rtos-net/rtos/rtos-dhcp.elf
 ```
 
 ## 单元级验证

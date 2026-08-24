@@ -73,18 +73,18 @@ MsgType：`CONTROL 0x01 / CONTROL_ACK 0x02 / STATUS 0x03 / ERROR 0x04 / HEARTBEA
 ### 1. 构建并验证（无需 root）
 
 ```bash
-# 构建 RTOS guest（需要 aarch64-linux-gnu-gcc，见 rtos/BUILD.md）
-cd <仓库外>/freertos-rtos/rtos && make && cp bin/rtos.bin <仓库>/tools/starry-rtos-net/rtos/
+# 构建两个 RTOS guest 变体（需要 aarch64-linux-gnu-gcc，见 rtos/BUILD.md）
+cd <仓库外>/freertos-rtos/rtos
+make                                  # 静态版 → 拷贝 rtos.bin / rtos.elf
+make clean && make AXNET_DHCP=1       # DHCP 版 → 拷贝 rtos-dhcp.bin / rtos-dhcp.elf
 
 # 主机集成测试（协议 + 客户端状态机：心跳/重连/超时恢复/分帧）
 cd tools/starry-rtos-net && cargo test --workspace
 
-# 无 root 验证 FreeRTOS server（QEMU + user 网络 + hostfwd）
-./host/rtos-standalone.sh           # 终端 1
-cargo run -p rtos-tester            # 终端 2：握手/心跳/周期STATUS/坏帧ERROR 全验证
-
-# 也可以把 starry-client 直接对 host 上的 server 跑（验证 client 统计）
-cargo run -p starry-client -- --server 127.0.0.1 --port 5000 --requests 1000
+# 无 root 验证 FreeRTOS server（QEMU + SLIRP + hostfwd，guest 走 DHCP）
+./host/rtos-standalone.sh             # 终端 1
+cargo run -p rtos-tester              # 终端 2：握手/心跳/周期STATUS/坏帧ERROR 全验证
+cargo run -p starry-client -- --server 127.0.0.1 --port 5000 --requests 100  # RTT/吞吐统计
 ```
 
 ### 2. 完整双 QEMU 演示（需要 root 建 TAP/br0）
