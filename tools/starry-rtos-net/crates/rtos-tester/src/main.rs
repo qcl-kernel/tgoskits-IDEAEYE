@@ -1,11 +1,11 @@
-//! `rtos-tester` -- host-side validator for the FreeRTOS AXNET/1 server.
+//! `rtos-tester`: host-side validator for the FreeRTOS AXNET/1 server.
 //!
-//! Intended to run against the RTOS guest in QEMU. With a user-mode netdev
-//! the port is forwarded, e.g.:
+//! Runs against the RTOS guest in QEMU.  With a user-mode netdev the port is
+//! forwarded, e.g.:
 //!
 //!   -netdev user,id=net0,hostfwd=tcp::5000-:5000
 //!
-//! and the tester connects to 127.0.0.1:5000. It checks the full server
+//! and the tester connects to 127.0.0.1:5000.  It checks the full server
 //! behaviour: handshake, CONTROL/ACK, HEARTBEAT echo, periodic STATUS push
 //! and the ERROR reply to a corrupt frame.
 
@@ -105,7 +105,7 @@ fn main() {
     let mut stream = TcpStream::connect(addr).expect("connect failed");
     stream.set_nodelay(true).ok();
 
-    // 1. Handshake: CONTROL(START) -> CONTROL_ACK.
+    // Handshake: CONTROL(START) -> CONTROL_ACK.
     let hb_seq = 0x1000u32;
     send_frame(&mut stream, MSG_CONTROL, hb_seq, b"command=START");
     let ack = wait_for(&mut stream, Duration::from_secs(5), |m| {
@@ -118,7 +118,7 @@ fn main() {
         failures += 1;
     }
 
-    // 2. CONTROL with payload -> CONTROL_ACK.
+    // CONTROL with payload -> CONTROL_ACK.
     let c_seq = 0x2000u32;
     send_frame(&mut stream, MSG_CONTROL, c_seq, b"hello-axnet");
     let ack2 = wait_for(&mut stream, Duration::from_secs(5), |m| {
@@ -131,7 +131,7 @@ fn main() {
         failures += 1;
     }
 
-    // 3. HEARTBEAT -> HEARTBEAT echo.
+    // HEARTBEAT -> HEARTBEAT echo.
     let h_seq = 0x3000u32;
     send_frame(&mut stream, MSG_HEARTBEAT, h_seq, &[]);
     let echo = wait_for(&mut stream, Duration::from_secs(5), |m| {
@@ -144,7 +144,7 @@ fn main() {
         failures += 1;
     }
 
-    // 4. Corrupt frame -> ERROR (bad CRC).
+    // Corrupt frame -> ERROR (bad CRC).
     {
         let mut frame = vec![0u8; frame_len(4)];
         encode_into(&mut frame, MSG_CONTROL, 0, 0x4000, now_us(), 0, b"data");
@@ -169,7 +169,7 @@ fn main() {
         }
     }
 
-    // 5. Periodic STATUS push (server sends every ~2 s).
+    // Periodic STATUS push (server sends every ~2 s).
     let status = wait_for(&mut stream, Duration::from_secs(6), |m| {
         m.msg_type == MSG_STATUS
     });

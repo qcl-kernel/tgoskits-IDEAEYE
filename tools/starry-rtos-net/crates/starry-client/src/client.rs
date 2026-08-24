@@ -1,22 +1,10 @@
-//! Core AXNET/1 client logic, independent of where it runs.
+//! AXNET/1 TCP client core, shared by the StarryOS binary, the host tester
+//! and the loopback tests.
 //!
-//! The same module drives:
-//!   - the StarryOS userspace binary (`starry-client`),
-//!   - the host-side tester against the FreeRTOS server in QEMU,
-//!   - the loopback integration tests (crates/tests/integration).
-//!
-//! Behaviour (matching the solution plan):
-//!   - TCP connect, then an AXNET/1 CONTROL(START) handshake,
-//!   - one HEARTBEAT every `heartbeat_ms`, the peer echoes it,
-//!   - `requests` CONTROL round-trips with `payload_len` payload bytes,
-//!     timing each RTT,
-//!   - a session is considered dead when no application-level frame arrives
-//!     within `timeout_ms`; the client then closes and reconnects with
-//!     exponential backoff (1, 2, 4, 8, ... capped at `max_reconnect_ms`),
-//!   - aggregate stats (success / error / timeout / reconnect, RTT
-//!     percentiles, effective application throughput).
-#![allow(clippy::too_many_arguments)]
-
+//! Connects to the server, does a CONTROL(START) handshake, then drives
+//! CONTROL round-trips and HEARTBEATs.  It times each RTT, tallies success /
+//! error / timeout / reconnect statistics, and reconnects with exponential
+//! backoff when the session dies.
 use std::{
     io::{self, Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpStream},
@@ -31,15 +19,15 @@ pub struct Config {
     pub port: u16,
     /// Number of CONTROL round-trips to complete.
     pub requests: usize,
-    /// Payload bytes of each CONTROL message (capped at `MAX_PAYLOAD`).
+    /// Payload bytes of each CONTROL message.
     pub payload_len: usize,
     /// Heartbeat interval.
     pub heartbeat_ms: u64,
-    /// Session considered dead after this long without an application frame.
+    /// A session is dead if no frame arrives within this window.
     pub timeout_ms: u64,
-    /// Total wall-clock bound; `None` = run until the requests are done.
+    /// Wall-clock bound; `None` runs until the requests finish.
     pub duration: Option<Duration>,
-    /// Reconnect backoff starts at 1 s and doubles up to this cap.
+    /// Reconnect backoff doubles from 1 s up to this cap.
     pub max_reconnect_ms: u64,
 }
 
@@ -47,8 +35,7 @@ pub struct Config {
 pub struct Stats {
     pub sent: usize,
     pub acked: usize,
-    /// Requests that were in flight when a session broke; their ACK can never
-    /// arrive, so they are resolved (not counted as missing) at completion.
+    /// In-flight requests lost when a session broke before their ACK arrived.
     pub lost: usize,
     pub errors: usize,
     pub timeouts: usize,
@@ -56,7 +43,7 @@ pub struct Stats {
     pub rtts_us: Vec<u64>,
     /// Payload bytes transmitted for the throughput phase.
     pub payload_bytes: u64,
-    /// Wall time spent on the throughput phase (from first request to last ack).
+    /// Wall time of the throughput phase, from first request to last ack.
     pub throughput_us: u64,
 }
 
@@ -92,9 +79,7 @@ impl Stats {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Requests completed (or duration expired).
     Done,
-    /// The TCP session broke; reconnect.
     Broken,
 }
 
@@ -111,8 +96,8 @@ impl FrameReader {
 
     pub fn push(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
-        // Bound the buffer: a stream that cannot produce a valid header is
-        // corrupt, so drop it rather than letting it grow forever.
+        // A stream that never yields a valid header is corrupt; drop it rather
+        // than let it grow without bound.
         if self.buf.len() > FRAME_MAX + 4096 {
             self.buf.clear();
         }
@@ -149,7 +134,7 @@ fn send_frame(
     stream.write_all(&frame)
 }
 
-/// Microsecond timestamp (monotonic).
+/// Wall-clock microseconds since the Unix epoch, used for the wire timestamp.
 pub fn now_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -189,8 +174,8 @@ pub fn connect_and_handshake(cfg: &Config, seq: &mut u32) -> io::Result<TcpStrea
     }
 }
 
-/// Record that the current session ended; an in-flight request can never be
-/// acknowledged, so it is counted as `lost`.
+/// Count a broken session.  An in-flight request can never be acked, so it
+/// counts as `lost`.
 fn mark_broken(stats: &mut Stats, in_flight: &Option<(u32, Instant)>, is_timeout: bool) -> Outcome {
     if in_flight.is_some() {
         stats.lost += 1;
@@ -226,7 +211,7 @@ pub fn run_session(
     loop {
         let now = Instant::now();
 
-        // 1. Heartbeat.
+        // Heartbeat.
         if now.duration_since(last_hb) >= Duration::from_millis(cfg.heartbeat_ms) {
             let hseq = *seq;
             *seq = seq.wrapping_add(1);
@@ -236,7 +221,7 @@ pub fn run_session(
             last_hb = now;
         }
 
-        // 2. Next request (one in flight keeps RTT measurement simple).
+        // Next request; one in flight keeps RTT measurement simple.
         if stats.sent < cfg.requests && in_flight.is_none() {
             let plen = cfg.payload_len.min(MAX_PAYLOAD);
             let payload = vec![0xA5u8; plen]; // deterministic fill
@@ -253,7 +238,7 @@ pub fn run_session(
             in_flight = Some((rseq, now));
         }
 
-        // 3. Read and process incoming frames.
+        // Read and process incoming frames.
         match stream.read(&mut buf) {
             Ok(0) => return mark_broken(stats, &in_flight, false), // peer closed
             Ok(n) => {
@@ -296,13 +281,12 @@ pub fn run_session(
             Err(_) => return mark_broken(stats, &in_flight, false),
         }
 
-        // 4. Liveness: no application frame for `timeout_ms`.
+        // Give up if no frame arrived within `timeout_ms`.
         if last_rx.elapsed() >= Duration::from_millis(cfg.timeout_ms) {
             return mark_broken(stats, &in_flight, true);
         }
 
-        // 5. Completion / time bound.  Every transmitted request is resolved
-        //    once acked + lost covers it.
+        // Done once every transmitted request is resolved (acked + lost).
         if stats.sent >= cfg.requests && stats.acked + stats.lost >= stats.sent {
             return Outcome::Done;
         }
