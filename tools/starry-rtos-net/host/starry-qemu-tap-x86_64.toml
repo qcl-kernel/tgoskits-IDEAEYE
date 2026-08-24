@@ -1,0 +1,26 @@
+# StarryOS QEMU runtime config for the StarryOS <-> RTOS demo.
+#
+# Same as os/StarryOS/configs/qemu/qemu-x86_64.toml except the netdev is a
+# tap on `br0` (via tap0) instead of user-mode networking, so StarryOS is
+# directly reachable at 192.168.100.2 by the FreeRTOS guest.
+#
+# Pass it to `cargo xtask starry qemu` with --qemu-config.
+args = [
+  "-m",
+  "512M",
+  "-nographic",
+  "-machine",
+  "q35",
+  "-device",
+  "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65",
+  "-drive",
+  "id=disk0,if=none,format=raw,file=${workspace}/tmp/axbuild/rootfs/rootfs-x86_64-alpine.img",
+  "-device",
+  "virtio-net-pci,netdev=net0,mac=02:00:00:00:01:02",
+  "-netdev",
+  "tap,id=net0,ifname=tap0,script=no,downscript=no",
+]
+uefi = true
+to_bin = true
+success_regex = []
+fail_regex = ["(?i)\\bpanic(?:ked)?\\b"]
